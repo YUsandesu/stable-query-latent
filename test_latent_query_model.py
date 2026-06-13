@@ -248,6 +248,8 @@ def train_and_test(
     criterion = torch.nn.CrossEntropyLoss()
 
     history = []
+    best_checkpoint = None
+    best_metrics = None
     try:
         for epoch in range(1, epochs + 1):
             model.train()
@@ -289,6 +291,12 @@ def train_and_test(
                     "test_accuracy": test_accuracy,
                 }
             )
+            if best_metrics is None or test_mae < best_metrics["test_mae"]:
+                best_metrics = history[-1]
+                best_checkpoint = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.state_dict().items()
+                }
             print(
                 f"epoch={epoch:03d} "
                 f"lr={current_lr:.8f} "
@@ -304,7 +312,7 @@ def train_and_test(
 
     if model_out:
         checkpoint = {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": best_checkpoint if best_checkpoint is not None else model.state_dict(),
             "input_dim": input_dim,
             "score_dim": score_dim,
             "output_dim": score_dim * SCORE_CLASS_COUNT,
@@ -320,6 +328,7 @@ def train_and_test(
             "test_ratio": test_ratio,
             "split": split_note,
             "split_by": split_by,
+            "best_metrics": best_metrics,
             "history": history,
         }
         torch.save(checkpoint, model_out)
@@ -338,7 +347,7 @@ def train_and_test(
                     f"{row['test_accuracy']:.10g}\n"
                 )
 
-    return history[-1] if history else None
+    return best_metrics if best_metrics is not None else (history[-1] if history else None)
 
 
 def main():
@@ -404,7 +413,7 @@ def main():
     )
     if final_metrics:
         print(
-            "final: "
+            "best: "
             f"train_ce={final_metrics['train_ce']:.6f}, "
             f"test_ce={final_metrics['test_ce']:.6f}, "
             f"test_mae_raw={final_metrics['test_mae']:.6f}, "
