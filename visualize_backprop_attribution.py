@@ -143,12 +143,9 @@ def resolve_class_index(args, logits_for_score):
 def compute_attribution(model, embeddings, score_index, class_index, score_dim, score_class_count, device, method):
     input_tensor = torch.from_numpy(embeddings).float().unsqueeze(0).to(device)
     input_tensor.requires_grad_(True)
-    key_padding_mask = torch.zeros((1, embeddings.shape[0]), dtype=torch.bool, device=device)
 
     model.zero_grad(set_to_none=True)
-    logits = model(input_tensor, key_padding_mask=key_padding_mask).view(
-        1, score_dim, score_class_count
-    )
+    logits = model(input_tensor).view(1, score_dim, score_class_count)
     selected_logit = logits[0, score_index, class_index]
     selected_logit.backward()
 
@@ -346,10 +343,7 @@ def main():
 
     with torch.no_grad():
         preview_inputs = torch.from_numpy(embeddings).float().unsqueeze(0).to(device)
-        preview_mask = torch.zeros((1, embeddings.shape[0]), dtype=torch.bool, device=device)
-        preview_logits = model(preview_inputs, key_padding_mask=preview_mask).view(
-            1, score_dim, score_class_count
-        )[0, score_index]
+        preview_logits = model(preview_inputs).view(1, score_dim, score_class_count)[0, score_index]
     class_index, predicted_class = resolve_class_index(args, preview_logits)
 
     attribution = compute_attribution(

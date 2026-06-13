@@ -172,16 +172,9 @@ class AttributionWorker(QObject):
             self.status.emit("Running prediction...")
             with torch.no_grad():
                 preview_inputs = torch.from_numpy(embeddings).float().unsqueeze(0).to(device)
-                preview_mask = torch.zeros(
-                    (1, embeddings.shape[0]),
-                    dtype=torch.bool,
-                    device=device,
-                )
-                preview_logits = model(preview_inputs, key_padding_mask=preview_mask).view(
-                    1,
-                    score_dim,
-                    score_class_count,
-                )[0, score_index]
+                preview_logits = model(preview_inputs).view(1, score_dim, score_class_count)[
+                    0, score_index
+                ]
             predicted_class = int(preview_logits.argmax().item())
             class_index = predicted_class if self.options.score_value is None else self.options.score_value - 1
 

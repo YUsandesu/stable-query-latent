@@ -6,7 +6,6 @@
 ## 任务定义
 
 - 输入：每个样本是一段 pseudo text 对应的句子 embedding 序列，维度为 `input_dim=1024`
-- 掩码：`key_padding_mask` 标记 padding 位置
 - 输出：10 个评分维度，每个维度做 5 类分类（1-5 分）
 - 最终输出维度：`10 * 5 = 50`
 
@@ -119,13 +118,13 @@
 - `dropout=0.0`
 - `split=score_combo groups=304 test_groups=61`
 
-最佳结果：
+实验结果：
 
-- `epoch=1444`
-- `train_ce=0.000006`
-- `test_ce=0.389588`
-- `test_mae=0.079697`
-- `test_accuracy=0.937273`
+- 最佳测试准确率出现在 `epoch=307`
+- `train_ce=0.0006218711`
+- `test_ce=0.2100884825`
+- `test_mae=0.0836363636`
+- `test_accuracy=0.9436363636`
 
 逐维测试结果：
 
@@ -166,4 +165,3 @@ python test_latent_query_model.py --epochs 500 --batch-size 64 --device cuda
 - [`latent_query_benchmark_multi_classifier.pt`](./latent_query_benchmark_multi_classifier.pt)
 - [`latent_query_training_history_multi_classifier.txt`](./latent_query_training_history_multi_classifier.txt)
 - [`latent_query_per_dim_multi_classifier.txt`](./latent_query_per_dim_multi_classifier.txt)
-

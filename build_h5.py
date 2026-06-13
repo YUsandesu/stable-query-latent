@@ -111,13 +111,10 @@ def build_h5(
     max_sequence_length = int(sequence_lengths.max())
     embedding_dim = int(embeddings.shape[1])
     inputs = np.zeros((sample_count, max_sequence_length, embedding_dim), dtype=np.float32)
-    key_padding_mask = np.ones((sample_count, max_sequence_length), dtype=np.bool_)
-
     for row_index in range(len(target_rows)):
         embedding_indices = row_to_embedding_indices[row_index]
         length = len(embedding_indices)
         inputs[row_index, :length] = embeddings[embedding_indices]
-        key_padding_mask[row_index, :length] = False
 
     targets = target_rows[score_columns].apply(pd.to_numeric, errors="raise").to_numpy(
         dtype=np.float32
@@ -135,7 +132,6 @@ def build_h5(
         h5.attrs["numeric_dataset_compression"] = compression or "none"
 
         create_numeric_dataset(h5, "inputs", inputs, compression)
-        create_numeric_dataset(h5, "key_padding_mask", key_padding_mask, compression)
         create_numeric_dataset(h5, "targets", targets, compression)
         h5.create_dataset("sequence_lengths", data=sequence_lengths)
         h5.create_dataset(

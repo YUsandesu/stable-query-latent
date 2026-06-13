@@ -40,13 +40,12 @@ class H5LatentQueryDataset(Dataset):
         row = int(self.indices[item])
         h5 = self._h5()
         tokens = torch.from_numpy(h5["inputs"][row]).float()
-        key_padding_mask = torch.from_numpy(h5["key_padding_mask"][row]).bool()
         target = torch.from_numpy(h5["targets"][row]).float()
 
         if self.target_mean is not None and self.target_std is not None:
             target = (target - self.target_mean) / self.target_std
 
-        return tokens, key_padding_mask, target
+        return tokens, target
 
     def close(self):
         if self.handle is not None:
@@ -55,10 +54,9 @@ class H5LatentQueryDataset(Dataset):
 
 
 class TensorLatentQueryDataset(Dataset):
-    def __init__(self, inputs, key_padding_masks, targets, indices, target_mean=None, target_std=None):
+    def __init__(self, inputs, targets, indices, target_mean=None, target_std=None):
         indices = np.asarray(indices, dtype=np.int64)
         self.inputs = torch.from_numpy(inputs[indices]).float()
-        self.key_padding_masks = torch.from_numpy(key_padding_masks[indices]).bool()
         self.targets = torch.from_numpy(targets[indices]).float()
 
         if target_mean is not None and target_std is not None:
@@ -68,7 +66,7 @@ class TensorLatentQueryDataset(Dataset):
         return self.targets.size(0)
 
     def __getitem__(self, item):
-        return self.inputs[item], self.key_padding_masks[item], self.targets[item]
+        return self.inputs[item], self.targets[item]
 
     def close(self):
         pass
@@ -134,15 +132,12 @@ def evaluate(model, loader, score_dim, device, pin_memory):
     criterion = torch.nn.CrossEntropyLoss(reduction="sum")
 
     with torch.no_grad():
-        for tokens, key_padding_mask, targets in loader:
+        for tokens, targets in loader:
             tokens = tokens.to(device, non_blocking=pin_memory)
-            key_padding_mask = key_padding_mask.to(device, non_blocking=pin_memory)
             targets = targets.to(device, non_blocking=pin_memory)
             target_classes = targets_to_classes(targets)
 
-            logits = model(tokens, key_padding_mask=key_padding_mask).view(
-                targets.size(0), score_dim, SCORE_CLASS_COUNT
-            )
+            logits = model(tokens).view(targets.size(0), score_dim, SCORE_CLASS_COUNT)
             total_loss += criterion(
                 logits.reshape(-1, SCORE_CLASS_COUNT),
                 target_classes.reshape(-1),
@@ -212,7 +207,6 @@ def train_and_test(
         game_ids = decode_h5_strings(h5["benchmark_game_id"][:]) if "benchmark_game_id" in h5 else None
         if preload_data:
             all_inputs = h5["inputs"][:]
-            all_key_padding_masks = h5["key_padding_mask"][:]
             all_targets_np = h5["targets"][:]
         else:
             all_targets_np = h5["targets"][:]
@@ -237,10 +231,10 @@ def train_and_test(
 
     if preload_data:
         train_dataset = TensorLatentQueryDataset(
-            all_inputs, all_key_padding_masks, all_targets_np, train_indices
+            all_inputs, all_targets_np, train_indices
         )
         test_dataset = TensorLatentQueryDataset(
-            all_inputs, all_key_padding_masks, all_targets_np, test_indices
+            all_inputs, all_targets_np, test_indices
         )
     else:
         train_dataset = H5LatentQueryDataset(h5_path, train_indices)
@@ -280,16 +274,13 @@ def train_and_test(
             train_loss_sum = 0.0
             train_item_count = 0
 
-            for tokens, key_padding_mask, targets in train_loader:
+            for tokens, targets in train_loader:
                 tokens = tokens.to(device, non_blocking=pin_memory)
-                key_padding_mask = key_padding_mask.to(device, non_blocking=pin_memory)
                 targets = targets.to(device, non_blocking=pin_memory)
                 target_classes = targets_to_classes(targets)
 
                 optimizer.zero_grad(set_to_none=True)
-                logits = model(tokens, key_padding_mask=key_padding_mask).view(
-                    targets.size(0), score_dim, SCORE_CLASS_COUNT
-                )
+                logits = model(tokens).view(targets.size(0), score_dim, SCORE_CLASS_COUNT)
                 loss = criterion(
                     logits.reshape(-1, SCORE_CLASS_COUNT),
                     target_classes.reshape(-1),
