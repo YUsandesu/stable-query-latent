@@ -6,3 +6,9 @@ pseudo_text_sentence_embeddings/sentence_metadata.csv
 *.h5
 *.npy
 pseudo_text_sentence_embeddings/manifest.json
+pseudo_text_sentence_embeddings_multi/sentence_metadata.csv
+pseudo_text_data_multi.csv
+latent_query_training_history_multi_classifier_smoke.txt
+latent_query_training_history_multi.txt
+latent_query_training_history.txt
+pseudo_text_sentence_embeddings_multi/manifest.json

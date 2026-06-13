@@ -35,12 +35,22 @@ def write_string_dataset(h5, name, values):
     h5.create_dataset(name, data=np.asarray(values, dtype=object), dtype=string_dtype)
 
 
+def create_numeric_dataset(h5, name, data, compression):
+    kwargs = {}
+    if compression:
+        kwargs["compression"] = compression
+        if compression == "gzip":
+            kwargs["compression_opts"] = 4
+    h5.create_dataset(name, data=data, **kwargs)
+
+
 def build_h5(
     target_csv,
     sentence_metadata_csv,
     embeddings_npy,
     output_h5,
     score_columns,
+    compression,
 ):
     target_csv = resolve_script_path(target_csv)
     sentence_metadata_csv = resolve_script_path(sentence_metadata_csv)
@@ -61,33 +71,41 @@ def build_h5(
     if missing_scores:
         raise ValueError(f"Missing score columns in target CSV: {missing_scores}")
 
-    duplicate_game_ids = target_rows["game_id"][target_rows["game_id"].duplicated()].tolist()
-    if duplicate_game_ids:
-        raise ValueError(
-            "target CSV must contain one row per game_id. Duplicate game_id values: "
-            f"{duplicate_game_ids[:20]}"
-        )
-
     if len(sentence_metadata) != len(embeddings):
         raise ValueError(
             "sentence_metadata row count does not match sentence_embeddings.npy: "
             f"{len(sentence_metadata)} != {len(embeddings)}"
         )
 
-    missing_game_ids = sorted(set(target_rows["game_id"]) - set(sentence_metadata["game_id"]))
-    if missing_game_ids:
+    if "row_index" not in sentence_metadata.columns:
+        raise ValueError("sentence_metadata CSV must contain a row_index column.")
+
+    row_indices = pd.to_numeric(sentence_metadata["row_index"], errors="raise").to_numpy(
+        dtype=np.int64
+    )
+    expected_row_indices = set(range(len(target_rows)))
+    available_row_indices = set(row_indices.tolist())
+    missing_row_indices = sorted(expected_row_indices - available_row_indices)
+    if missing_row_indices:
         raise ValueError(
-            "Some target CSV game_id values do not appear in sentence metadata: "
-            f"{missing_game_ids[:20]}"
+            "Some target CSV rows do not appear in sentence metadata row_index values: "
+            f"{missing_row_indices[:20]}"
+        )
+    extra_row_indices = sorted(available_row_indices - expected_row_indices)
+    if extra_row_indices:
+        raise ValueError(
+            "sentence metadata contains row_index values outside the target CSV range: "
+            f"{extra_row_indices[:20]}"
         )
 
-    game_to_embedding_indices = {
-        game_id: group.sort_values("sentence_index")["embedding_index"].to_numpy(dtype=np.int64)
-        for game_id, group in sentence_metadata.groupby("game_id", sort=False)
+    row_to_embedding_indices = {
+        int(row_index): group.sort_values("sentence_index")["embedding_index"].to_numpy(dtype=np.int64)
+        for row_index, group in sentence_metadata.groupby(row_indices, sort=False)
     }
-    sequence_lengths = target_rows["game_id"].map(
-        lambda game_id: len(game_to_embedding_indices[game_id])
-    ).to_numpy(dtype=np.int64)
+    sequence_lengths = np.asarray(
+        [len(row_to_embedding_indices[row_index]) for row_index in range(len(target_rows))],
+        dtype=np.int64,
+    )
 
     sample_count = len(target_rows)
     max_sequence_length = int(sequence_lengths.max())
@@ -95,8 +113,8 @@ def build_h5(
     inputs = np.zeros((sample_count, max_sequence_length, embedding_dim), dtype=np.float32)
     key_padding_mask = np.ones((sample_count, max_sequence_length), dtype=np.bool_)
 
-    for row_index, game_id in enumerate(target_rows["game_id"]):
-        embedding_indices = game_to_embedding_indices[game_id]
+    for row_index in range(len(target_rows)):
+        embedding_indices = row_to_embedding_indices[row_index]
         length = len(embedding_indices)
         inputs[row_index, :length] = embeddings[embedding_indices]
         key_padding_mask[row_index, :length] = False
@@ -111,17 +129,14 @@ def build_h5(
         h5.attrs["source_sentence_metadata_csv"] = str(sentence_metadata_csv.resolve())
         h5.attrs["source_embeddings_npy"] = str(embeddings_npy.resolve())
         h5.attrs["score_columns_json"] = json.dumps(score_columns)
-        h5.attrs["input_layout"] = "game_average_sample, sentence_token, embedding_dim"
-        h5.attrs["target_layout"] = "mapped_one_per_game_score"
+        h5.attrs["input_layout"] = "text_variant_sample, sentence_token, embedding_dim"
+        h5.attrs["target_layout"] = "mapped_game_score_repeated_per_text_variant"
 
-        h5.create_dataset("inputs", data=inputs, compression="gzip", compression_opts=4)
-        h5.create_dataset(
-            "key_padding_mask",
-            data=key_padding_mask,
-            compression="gzip",
-            compression_opts=4,
-        )
-        h5.create_dataset("targets", data=targets, compression="gzip", compression_opts=4)
+        h5.attrs["numeric_dataset_compression"] = compression or "none"
+
+        create_numeric_dataset(h5, "inputs", inputs, compression)
+        create_numeric_dataset(h5, "key_padding_mask", key_padding_mask, compression)
+        create_numeric_dataset(h5, "targets", targets, compression)
         h5.create_dataset("sequence_lengths", data=sequence_lengths)
         h5.create_dataset(
             "benchmark_row_index",
@@ -141,6 +156,13 @@ def build_h5(
             "benchmark_score_sample_count",
             data=target_rows["score_sample_count"].to_numpy(dtype=np.int64),
         )
+        if "text_variant_index" in target_rows.columns:
+            h5.create_dataset(
+                "text_variant_index",
+                data=pd.to_numeric(target_rows["text_variant_index"], errors="raise").to_numpy(
+                    dtype=np.int64
+                ),
+            )
 
         metadata_group = h5.create_group("sentence_metadata")
         for column in sentence_metadata.columns:
@@ -157,6 +179,7 @@ def build_h5(
         "max_sequence_length": max_sequence_length,
         "embedding_dim": embedding_dim,
         "output_dim": len(score_columns),
+        "compression": compression or "none",
     }
 
 
@@ -176,7 +199,14 @@ def main():
     )
     parser.add_argument("--output-h5", default="benchmark_sentence_latent_query.h5")
     parser.add_argument("--score-columns", nargs="*", default=DEFAULT_SCORE_COLUMNS)
+    parser.add_argument(
+        "--compression",
+        choices=["none", "gzip", "lzf"],
+        default="none",
+        help="Compression for numeric training arrays. Default none is faster for random training reads.",
+    )
     args = parser.parse_args()
+    compression = None if args.compression == "none" else args.compression
 
     summary = build_h5(
         args.target_csv,
@@ -184,10 +214,11 @@ def main():
         args.embeddings_npy,
         args.output_h5,
         args.score_columns,
+        compression,
     )
     print(
         "wrote {path}: samples={samples}, max_tokens={max_sequence_length}, "
-        "embedding_dim={embedding_dim}, output_dim={output_dim}".format(**summary)
+        "embedding_dim={embedding_dim}, output_dim={output_dim}, compression={compression}".format(**summary)
     )
 
 
