@@ -1,8 +1,14 @@
 import argparse
 import html
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+_MODEL_DIR = Path(__file__).resolve().parent
+_ROOT = _MODEL_DIR.parent
+sys.path.insert(0, str(_MODEL_DIR))
+sys.path.insert(0, str(_ROOT / "embedding"))
 
 import torch
 
@@ -15,8 +21,8 @@ from embed_pseudo_text_sentences import (
 from latent_query_model import LatentQueryFlatRegressor
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CHECKPOINT = "latent_query_benchmark_multi_classifier.pt"
+SCRIPT_DIR = _ROOT
+DEFAULT_CHECKPOINT = "bench_data/latent_query_benchmark_multi_classifier.pt"
 DEFAULT_OUTPUT_HTML = "backprop_attribution.html"
 
 
@@ -289,7 +295,7 @@ def parse_args():
     parser.add_argument("--text", help="Raw text to explain.")
     parser.add_argument("--text-file", type=Path, help="UTF-8 text file to explain.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
-    parser.add_argument("--manifest", default="pseudo_text_sentence_embeddings_multi/manifest.json")
+    parser.add_argument("--manifest", default="bench_data/pseudo_text_sentence_embeddings_multi/manifest.json")
     parser.add_argument(
         "--list-score-columns",
         action="store_true",

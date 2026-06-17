@@ -525,10 +525,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate pseudo English game-description text from benchmark scores."
     )
-    parser.add_argument("--input", default="benchmark.csv", help="Input benchmark CSV path.")
+    parser.add_argument("--input", default="bench_data/benchmark.csv", help="Input benchmark CSV path.")
     parser.add_argument(
         "--output",
-        default="pseudo_text_data.csv",
+        default="bench_data/pseudo_text_data.csv",
         help="Output path. Use .csv or .jsonl.",
     )
     parser.add_argument(

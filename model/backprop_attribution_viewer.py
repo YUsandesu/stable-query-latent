@@ -46,7 +46,7 @@ from visualize_backprop_attribution import (
 )
 
 
-DEFAULT_MANIFEST = "pseudo_text_sentence_embeddings_multi/manifest.json"
+DEFAULT_MANIFEST = "bench_data/pseudo_text_sentence_embeddings_multi/manifest.json"
 
 
 class ProbabilityTableModel(QAbstractTableModel):

@@ -183,17 +183,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Package mapped pseudo-text scores, sentence metadata, and sentence embeddings into HDF5."
     )
-    parser.add_argument("--target-csv", default="pseudo_text_data_one_per_game.csv")
+    parser.add_argument("--target-csv", default="bench_data/pseudo_text_data_one_per_game.csv")
     parser.add_argument("--benchmark-csv", dest="target_csv", help=argparse.SUPPRESS)
     parser.add_argument(
         "--sentence-metadata-csv",
-        default="pseudo_text_sentence_embeddings/sentence_metadata.csv",
+        default="bench_data/pseudo_text_sentence_embeddings/sentence_metadata.csv",
     )
     parser.add_argument(
         "--embeddings-npy",
-        default="pseudo_text_sentence_embeddings/sentence_embeddings.npy",
+        default="bench_data/pseudo_text_sentence_embeddings/sentence_embeddings.npy",
     )
-    parser.add_argument("--output-h5", default="benchmark_sentence_latent_query.h5")
+    parser.add_argument("--output-h5", default="bench_data/benchmark_sentence_latent_query.h5")
     parser.add_argument("--score-columns", nargs="*", default=DEFAULT_SCORE_COLUMNS)
     parser.add_argument(
         "--compression",

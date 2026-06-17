@@ -8,9 +8,9 @@ import numpy as np
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
-DEFAULT_INPUT_CSV = "pseudo_text_data_one_per_game.csv"
+DEFAULT_INPUT_CSV = "bench_data/pseudo_text_data_one_per_game.csv"
 DEFAULT_TEXT_COLUMN = "generated_text"
-DEFAULT_OUTPUT_DIR = "pseudo_text_sentence_embeddings"
+DEFAULT_OUTPUT_DIR = "bench_data/pseudo_text_sentence_embeddings"
 DEFAULT_SENTENCE_MODEL_NAME = "sat-3l-sm"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
