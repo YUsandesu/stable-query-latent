@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_INPUT = str(SCRIPT_DIR.parent / "PXIbenchmark_data" / "benchmark.csv")
+DEFAULT_OUTPUT = str(SCRIPT_DIR.parent / "pesudo_data" / "pseudo_text_data.csv")
+
 SCORE_COLUMNS = [
     "psychological_meaning",
     "psychological_mastery",
@@ -525,10 +529,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate pseudo English game-description text from benchmark scores."
     )
-    parser.add_argument("--input", default="bench_data/benchmark.csv", help="Input benchmark CSV path.")
+    parser.add_argument("--input", default=DEFAULT_INPUT, help="Input benchmark CSV path.")
     parser.add_argument(
         "--output",
-        default="bench_data/pseudo_text_data.csv",
+        default=DEFAULT_OUTPUT,
         help="Output path. Use .csv or .jsonl.",
     )
     parser.add_argument(

@@ -2,7 +2,9 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "model"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+# latent_query_model.py lives at the project root (one level up).
+sys.path.insert(0, str(SCRIPT_DIR.parent))
 
 import h5py
 import numpy as np
@@ -12,7 +14,6 @@ from torch.utils.data import DataLoader, Dataset
 from latent_query_model import LatentQueryFlatRegressor
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
 SCORE_CLASS_COUNT = 5
 
 
@@ -390,7 +391,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train/test latent_query_model as per-score 5-class classifier from HDF5."
     )
-    parser.add_argument("--input-h5", default="bench_data/benchmark_sentence_latent_query_multi.h5")
+    parser.add_argument("--input-h5",
+                        default=str(SCRIPT_DIR / "pesudo_data" / "benchmark_sentence_latent_query_multi.h5"))
     parser.add_argument("--epochs", type=int, default=3000)
     parser.add_argument(
         "--batch-size",
@@ -419,9 +421,10 @@ def main():
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--model-out", default="bench_data/latent_query_benchmark_multi_classifier.pt")
-    parser.add_argument("--history-txt", default="bench_data/latent_query_training_history_multi_classifier.txt")
-    parser.add_argument("--per-dim-txt", default="bench_data/latent_query_per_dim_multi_classifier.txt")
+    heads_dir = SCRIPT_DIR / "heads"
+    parser.add_argument("--model-out", default=str(heads_dir / "latent_query_benchmark_multi_classifier.pt"))
+    parser.add_argument("--history-txt", default=str(heads_dir / "latent_query_training_history_multi_classifier.txt"))
+    parser.add_argument("--per-dim-txt", default=str(heads_dir / "latent_query_per_dim_multi_classifier.txt"))
     parser.add_argument(
         "--no-preload-data",
         action="store_true",

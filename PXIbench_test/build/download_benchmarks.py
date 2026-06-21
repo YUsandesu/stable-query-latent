@@ -24,6 +24,9 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "https://protected-ridge-17548.herokuapp.com/"
 DEFAULT_GENDERS = ["m", "f", "b", "n", "o"]
+# Output goes to ../PXIbenchmark_data/ alongside this build/ dir.
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUT = str(SCRIPT_DIR.parent / "PXIbenchmark_data")
 
 
 def post_json(url: str, payload: dict[str, Any], retries: int = 3) -> dict[str, Any]:
@@ -473,7 +476,7 @@ def parse_args() -> argparse.Namespace:
         description="Download benchmark data for every game in the PXI Dash app."
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--out", default="benchmark_downloads", help="Output directory")
+    parser.add_argument("--out", default=DEFAULT_OUT, help="Output directory")
     parser.add_argument("--limit", type=int, help="Only download the first N games")
     parser.add_argument("--game-id", action="append", help="Download only this game id; repeatable")
     parser.add_argument(

@@ -7,12 +7,13 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
-DEFAULT_INPUT_CSV = "bench_data/pseudo_text_data_one_per_game.csv"
-DEFAULT_TEXT_COLUMN = "generated_text"
-DEFAULT_OUTPUT_DIR = "bench_data/pseudo_text_sentence_embeddings"
-DEFAULT_SENTENCE_MODEL_NAME = "sat-3l-sm"
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_INPUT_CSV = str(SCRIPT_DIR.parent / "pesudo_data" / "pseudo_text_data_one_per_game.csv")
+DEFAULT_TEXT_COLUMN = "generated_text"
+DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR.parent / "pesudo_data" / "pseudo_text_sentence_embeddings")
+DEFAULT_SENTENCE_MODEL_NAME = "sat-3l-sm"
 
 
 def normalize_text(text):

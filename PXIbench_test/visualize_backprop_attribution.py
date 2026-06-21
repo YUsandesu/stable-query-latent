@@ -5,10 +5,12 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-_MODEL_DIR = Path(__file__).resolve().parent
-_ROOT = _MODEL_DIR.parent
-sys.path.insert(0, str(_MODEL_DIR))
-sys.path.insert(0, str(_ROOT / "embedding"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = SCRIPT_DIR.parent
+# latent_query_model.py is at project root; embed_pseudo_text_sentences.py is in
+# this dir's build/ subdir. Put both on sys.path so imports work from any cwd.
+sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(SCRIPT_DIR / "build"))
 
 import torch
 
@@ -21,9 +23,8 @@ from embed_pseudo_text_sentences import (
 from latent_query_model import LatentQueryFlatRegressor
 
 
-SCRIPT_DIR = _ROOT
-DEFAULT_CHECKPOINT = "bench_data/latent_query_benchmark_multi_classifier.pt"
-DEFAULT_OUTPUT_HTML = "backprop_attribution.html"
+DEFAULT_CHECKPOINT = str(SCRIPT_DIR / "heads" / "latent_query_benchmark_multi_classifier.pt")
+DEFAULT_OUTPUT_HTML = str(SCRIPT_DIR / "backprop_attribution.html")
 
 
 def resolve_script_path(path):
@@ -295,7 +296,8 @@ def parse_args():
     parser.add_argument("--text", help="Raw text to explain.")
     parser.add_argument("--text-file", type=Path, help="UTF-8 text file to explain.")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
-    parser.add_argument("--manifest", default="bench_data/pseudo_text_sentence_embeddings_multi/manifest.json")
+    parser.add_argument("--manifest",
+                        default=str(SCRIPT_DIR / "pesudo_data" / "pseudo_text_sentence_embeddings_multi" / "manifest.json"))
     parser.add_argument(
         "--list-score-columns",
         action="store_true",
