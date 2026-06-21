@@ -12,9 +12,17 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from latent_query_model import LatentQueryFlatRegressor
+from latent_query_model_v2 import LatentQueryFunnelRegressor
 
 
 SCORE_CLASS_COUNT = 5
+
+# Selectable architectures. v1 = original (one learnable latent array per stage);
+# v2 = single learnable array + self-attention, later queries are linear reductions.
+MODEL_REGISTRY = {
+    "v1": LatentQueryFlatRegressor,
+    "v2": LatentQueryFunnelRegressor,
+}
 
 
 def resolve_script_path(path):
@@ -252,6 +260,7 @@ def train_and_test(
     per_dim_txt,
     preload_data,
     split_by,
+    model_name="v1",
 ):
     torch.manual_seed(seed)
     device = torch.device(device_name if device_name else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -341,7 +350,8 @@ def train_and_test(
         f"preload_data={preload_data} input_layout={input_layout}"
     )
 
-    model = LatentQueryFlatRegressor(
+    model_class = MODEL_REGISTRY[model_name]
+    model = model_class(
         input_dim=input_dim,
         output_dim=score_dim * SCORE_CLASS_COUNT,
         hidden_dim=hidden_dim,
@@ -350,6 +360,8 @@ def train_and_test(
         num_heads=num_heads,
         dropout=dropout,
     ).to(device)
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"model={model_name} ({model_class.__name__}) params={param_count}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
@@ -420,6 +432,8 @@ def train_and_test(
     if model_out:
         checkpoint = {
             "model_state_dict": best_checkpoint if best_checkpoint is not None else model.state_dict(),
+            "model_name": model_name,
+            "param_count": param_count,
             "input_dim": input_dim,
             "score_dim": score_dim,
             "score_columns": score_columns,
@@ -493,6 +507,8 @@ def main():
         help="Split test data by full target score combo, game_id, or raw rows.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--model", choices=list(MODEL_REGISTRY), default="v1",
+                        help="Architecture: v1 (original) or v2 (single latent array + self-attn + reduced queries).")
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--flat-dim", type=int, default=128)
     parser.add_argument(
@@ -534,6 +550,7 @@ def main():
         per_dim_txt=args.per_dim_txt,
         preload_data=not args.no_preload_data,
         split_by=args.split_by,
+        model_name=args.model,
     )
     if final_metrics:
         print(
