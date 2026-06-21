@@ -25,11 +25,11 @@ import sys
 import time
 from pathlib import Path
 
-# Project root holds embedding_data.py and cloud_embedding.py; make them
-# importable when this script lives in sst/ and is run from any cwd.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+# embedding_data.py (and the cloud_embedding.py it imports) live in
+# ../game_review_data/. Put that on sys.path so they import cleanly from any cwd.
+_GAME_REVIEW_DATA = Path(__file__).resolve().parent.parent / "game_review_data"
+if str(_GAME_REVIEW_DATA) not in sys.path:
+    sys.path.insert(0, str(_GAME_REVIEW_DATA))
 
 from embedding_data import DEFAULT_LOCAL_MODEL, CloudEmbedder, LocalEmbedder  # noqa: E402
 

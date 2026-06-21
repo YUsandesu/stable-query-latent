@@ -26,3 +26,8 @@ tokenAPI.txt
 /sst/clean
 /sst/raw
 /game_review_data/Steam Games Metadata and Player Reviews (2020–2024
+/bench_data/pseudo_text_sentence_embeddings
+/bench_data/pseudo_text_sentence_embeddings
+/game_review_data/__pycache__
+/PXIbench_test/pesudo_data
+/PXIbench_test/heads
