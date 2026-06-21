@@ -94,4 +94,4 @@ so a saved `.pt` always knows which architecture produced it.
 
 v2 beats v1 on every metric across two seeds — **even when shrunk to fewer
 parameters than v1**, so the gain is architectural, not capacity. Full numbers and
-methodology in [`heads/COMPARISON.md`](heads/COMPARISON.md).
+methodology in [`COMPARISON.md`](COMPARISON.md).
