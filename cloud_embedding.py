@@ -23,13 +23,16 @@ import requests
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Endpoint URL and token both come from the gitignored credentials file at the
-# project root. No URL is hardcoded — change the endpoint by editing that file.
+# project root (this script's own directory). No URL is hardcoded — change the
+# endpoint by editing that file.
 # Format (one KEY=VALUE per line, '#' for comments, blank lines allowed):
 #     url=https://<your-endpoint>.huggingface.cloud
 #     token=hf_xxx...
-DEFAULT_TOKEN_FILE = str(SCRIPT_DIR.parent / "tokenAPI.txt")
-DEFAULT_INPUT_DIR = "game_review_cleaned_3_sentences"
-DEFAULT_OUTPUT_DIR = "game_review_cleaned_3_sentence_embeddings"
+DEFAULT_TOKEN_FILE = str(SCRIPT_DIR / "tokenAPI.txt")
+# When this script is used as a standalone CLI for the game-review flat-vector
+# pipeline, point at the data dirs under game_review_data/.
+DEFAULT_INPUT_DIR = str(SCRIPT_DIR / "game_review_data" / "game_review_cleaned_3_sentences")
+DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "game_review_data" / "game_review_cleaned_3_sentence_embeddings")
 
 # The endpoint is configured for an Nvidia L4 with a maximum concurrency of 512,
 # so keep at most this many requests in flight at once.
