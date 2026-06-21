@@ -213,10 +213,10 @@ BUILDERS = {
 def main() -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     parser = argparse.ArgumentParser(description="Download + clean + rebuild SST (no `datasets` needed).")
-    parser.add_argument("--cache", default=os.path.join(here, "sst", "raw"),
-                        help="dir for raw downloads/extraction (default: ./sst/raw)")
-    parser.add_argument("--output", default=os.path.join(here, "sst", "clean"),
-                        help="dir for the cleaned CSVs (default: ./sst/clean)")
+    parser.add_argument("--cache", default=os.path.join(here, "raw"),
+                        help="dir for raw downloads/extraction (default: <script_dir>/raw)")
+    parser.add_argument("--output", default=os.path.join(here, "clean"),
+                        help="dir for the cleaned CSVs (default: <script_dir>/clean)")
     parser.add_argument("--configs", nargs="+", default=list(BUILDERS),
                         choices=list(BUILDERS), help="which configs to build")
     args = parser.parse_args()

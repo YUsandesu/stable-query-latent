@@ -17,9 +17,11 @@ latent_query_training_history_multi_classifier_nomask_smoke.txt
 /game_review_cleaned_3
 /game_review_cleaned_3_sentence_embeddings
 /embedding/__pycache__
-/sst
 /game_review_cleaned_3_sentences
 tokenAPI.txt
 *.json
 *.log
 /Steam Games Metadata and Player Reviews (2020–2024
+/sst/__pycache__
+/sst/clean
+/sst/raw
