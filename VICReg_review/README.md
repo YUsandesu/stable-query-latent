@@ -23,3 +23,14 @@ C:/Users/admin/anaconda3/envs/cuda_Vit/python.exe VICReg_review/train_vicreg_rev
 
 Outputs are written under `VICReg_review/heads/` by default. Checkpoints and JSON
 manifests are ignored by the project `.gitignore`.
+
+HDF5 path for faster training:
+
+```powershell
+C:/Users/admin/anaconda3/envs/cuda_Vit/python.exe VICReg_review/build_review_h5.py --workers 2 --shards 8
+C:/Users/admin/anaconda3/envs/cuda_Vit/python.exe VICReg_review/train_vicreg_review_h5.py --device cuda --amp --epochs 100 --batch-size 16
+```
+
+Use `--cache-mode full` only when RAM can hold the next prepared epoch. The
+default `queue` mode overlaps H5 loading with GPU training using a bounded
+prefetch queue.
