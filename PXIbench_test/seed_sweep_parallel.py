@@ -27,7 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 META_SEED = 20240622
 NUM_SEEDS = 10
 EPOCHS = 800
-CONFIGS = [("v1", 64), ("v2", 64), ("v2", 56)]
+CONFIGS = [("v1", 64), ("v2", 64), ("v2", 56), ("base", 64)]
 H5 = str(SCRIPT_DIR / "pesudo_data" / "benchmark_sentence_latent_query_multi.h5")
 
 
@@ -61,16 +61,21 @@ def parse_args():
                         help="Concurrent training processes on the GPU.")
     parser.add_argument("--num-seeds", type=int, default=NUM_SEEDS)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--models", nargs="+", default=None,
+                        help="Filter to these config keys (e.g. base_h64). Default: all CONFIGS.")
+    parser.add_argument("--out", default="seed_sweep_parallel.json",
+                        help="Output filename under heads/.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     seeds = [int(s) for s in np.random.default_rng(META_SEED).integers(1, 1_000_000, args.num_seeds)]
-    jobs = [(m, h, seed, args.epochs) for seed in seeds for (m, h) in CONFIGS]
+    configs = [(m, h) for m, h in CONFIGS if args.models is None or key_of(m, h) in args.models]
+    jobs = [(m, h, seed, args.epochs) for seed in seeds for (m, h) in configs]
     print(f"seeds={seeds}\njobs={len(jobs)} workers={args.workers} epochs={args.epochs}", flush=True)
 
-    results = {key_of(m, h): [] for m, h in CONFIGS}
+    results = {key_of(m, h): [] for m, h in configs}
     started = time.time()
     done = 0
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -97,7 +102,7 @@ def main():
 
     out = {"seeds": seeds, "epochs": args.epochs, "results": results, "summary": summary,
            "elapsed_seconds": round(time.time() - started, 1)}
-    (SCRIPT_DIR / "heads" / "seed_sweep_parallel.json").write_text(
+    (SCRIPT_DIR / "heads" / args.out).write_text(
         json.dumps(out, indent=2), encoding="utf-8")
 
     print(f"\n===== SUMMARY (mean +/- std, {args.num_seeds} seeds) =====")
