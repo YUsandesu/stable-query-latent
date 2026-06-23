@@ -1,8 +1,14 @@
-# Model Comparison — v1 vs v2
+# Model Comparison — v1 vs v2 vs base
 
-Comparison of the original `LatentQueryFlatRegressor` (**v1**) against the redesigned
-`LatentQueryFunnelRegressor` (**v2**, see [`README_2.md`](README_2.md)) on the PXI
-multi-variant benchmark.
+Comparison of three architectures on the PXI multi-variant benchmark:
+
+- **v1** — original `LatentQueryFlatRegressor` (one learnable latent array per stage).
+- **v2** — `LatentQueryFunnelRegressor` (one learnable array + self-attention, later
+  queries are linear reductions feeding a cross-attention funnel; see
+  [`README_2.md`](README_2.md)).
+- **base** — `LatentQueryBaseRegressor`: only the first latent array + self-attention,
+  then each latent's **feature dim** is funneled `64→16→8` and projected to output.
+  No cross-attention funnel. The smallest model.
 
 ## Setup
 
@@ -22,52 +28,60 @@ multi-variant benchmark.
 
 Aggregated over **10 random seeds** `[412384, 701183, 792180, 283149, 493976, 27630,
 69219, 415472, 273118, 633492]` (generated from meta-seed 20240622). Each config
-trained 800 epochs per seed. Raw per-run numbers in [`heads/seed_sweep.json`](heads/seed_sweep.json).
+trained 800 epochs per seed. Raw per-run numbers in
+[`heads/seed_sweep.json`](heads/seed_sweep.json) (v1/v2) and
+[`heads/seed_sweep_base.json`](heads/seed_sweep_base.json) (base).
 
 | model | params | test_acc ↑ | test_mae ↓ | test_ce ↓ |
 |---|---:|---:|---:|---:|
-| v1 (hidden64) | 292,914 | 0.9545 ± 0.0069 | 0.0634 ± 0.0073 | 0.2063 ± 0.0331 |
-| v2 (hidden64) | 342,026 | 0.9765 ± 0.0056 | 0.0330 ± 0.0081 | 0.1009 ± 0.0297 |
-| **v2 (hidden56)** | **278,706** | **0.9802 ± 0.0068** | **0.0285 ± 0.0090** | **0.0803 ± 0.0257** |
+| v1 (hidden64)   | 292,914 | 0.9545 ± 0.0069 | 0.0634 ± 0.0073 | 0.2063 ± 0.0331 |
+| v2 (hidden64)   | 342,026 | 0.9765 ± 0.0056 | 0.0330 ± 0.0081 | 0.1009 ± 0.0297 |
+| v2 (hidden56)   | 278,706 | 0.9802 ± 0.0068 | 0.0285 ± 0.0090 | 0.0803 ± 0.0257 |
+| **base (hidden64)** | **182,442** | **0.9865 ± 0.0049** | **0.0234 ± 0.0094** | **0.0482 ± 0.0203** |
 
 ### Paired differences (same split per seed)
 
-| comparison | Δacc (mean ± std) | Δmae | Δce | acc win-rate |
-|---|---:|---:|---:|---:|
-| v2(h64) − v1(h64) | **+0.0220 ± 0.0061** | −0.0304 | −0.1055 | **10/10** |
-| v2(h56) − v1(h64) | **+0.0257 ± 0.0057** | −0.0349 | −0.1260 | **10/10** |
-| v2(h56) − v2(h64) | +0.0037 ± 0.0066 | −0.0045 | — | 7/10 |
+| comparison | Δacc (mean ± std) | Δmae | acc win-rate |
+|---|---:|---:|---:|
+| v2(h64) − v1(h64)   | +0.0220 ± 0.0061 | −0.0304 | 10/10 |
+| v2(h56) − v1(h64)   | +0.0257 ± 0.0057 | −0.0349 | 10/10 |
+| v2(h56) − v2(h64)   | +0.0037 ± 0.0066 | −0.0045 | 7/10 |
+| **base − v1(h64)**  | **+0.0321 ± 0.0051** | −0.0400 | **10/10** |
+| **base − v2(h64)**  | **+0.0101 ± 0.0044** | −0.0096 | **10/10** |
+| **base − v2(h56)**  | **+0.0064 ± 0.0040** | −0.0051 | **9/10** |
 
 ## Findings
 
-1. **v2 beats v1, decisively and robustly.** Paired Δacc ≈ +2.2–2.6% with a
-   **10/10 win-rate**, and the effect (~0.022) is **~4× larger than its own std
-   (~0.006)** — far outside seed noise. mae is roughly halved (0.063 → 0.033/0.029)
-   and ce nearly halved (0.206 → 0.10/0.08).
-2. **The gain is architectural, not capacity.** The `hidden56` control has
-   **278,706 params — fewer than v1's 292,914** — yet is the *best* config overall.
-   Parameter count does not explain the improvement.
-3. **hidden56 vs hidden64 is a wash.** Paired Δacc = +0.0037 with std 0.0066
-   (win-rate 7/10) — the difference is **smaller than its own std**, i.e. within
-   noise. hidden56 leans slightly better and is cheaper, so prefer it for the
-   marginal edge + lower cost, but the two are statistically indistinguishable.
-4. **v2 converges earlier** (best checkpoint ~ep132 vs ~ep334 for v1, observed on the
-   single-seed runs) and is steadier late in training.
+1. **base is the best — and the smallest.** With **182k params (≈half of v2(h64))**
+   it tops every metric. Paired vs v2(h64): Δacc **+0.0101 ± 0.0044, 10/10** (effect
+   ~2.3× its std → significant). Paired vs the previous best v2(h56): Δacc
+   **+0.0064 ± 0.0040, 9/10** (~1.6× std → robust). So **the cross-attention funnel in
+   v2 is a net negative** here — dropping it and instead funneling the *feature* dim
+   (64→16→8) in the head both shrinks the model and improves it.
+2. **"Shrink params → better generalization" holds on this dataset.** Ranked by acc,
+   the order is **base (182k) > v2 h56 (279k) > v2 h64 (342k) > v1 (293k)** — the
+   smallest model wins. Aggressive feature bottleneck + keeping all 32 latents +
+   self-attention is a stronger inductive bias than a deeper cross-attention stack on
+   only 1475 training samples. (Same lesson as SST, where the narrow `64→16→4` head won.)
+3. **v2 still clearly beats v1** (Δacc +2.2–2.6%, 10/10), so the *first* changes —
+   single learnable array + self-attention — are real wins. It's the *extra
+   cross-attention funnel stages* that don't pay off; the feature-funnel head captures
+   the benefit more cheaply.
+4. **hidden56 vs hidden64 (within v2) is a wash** (Δacc +0.0037, std 0.0066, 7/10) —
+   within noise; consistent with the "smaller is at least as good" trend.
 
-## Why v2 helps (interpretation)
+## Interpretation
 
-The three changes work together:
+What actually helps, in order of impact:
 
-1. **Single learnable latent array; later queries are linear reductions of the
-   previous latents.** v1's per-stage queries are static `nn.Parameter`s — sample-
-   independent until they attend. v2's later queries are built from what the model
-   has *already* aggregated for *this* sample, so they are input-adaptive and carry
-   more signal into each cross-attention.
-2. **Self-attention after the first cross-attention.** It lets the 32 latents
-   exchange information and integrate globally *before* the funnel narrows, so the
-   reduced queries are computed from a better-mixed representation.
-3. **Funnel of cross-attention** (each stage queries the previous stage's latents)
-   gives a clean hierarchical refinement rather than three independent query sets.
+1. **One learnable latent array + self-attention over the latents** — the big jump
+   (v1 → v2 → base all keep this). Self-attention lets the 32 latents integrate
+   globally before the head.
+2. **An aggressive bottleneck before the output** — base funnels each latent's feature
+   dim 64→16→8; this regularizes hard on the small dataset and is cheaper than v2's
+   latent-count cross-attention funnel.
+3. **The cross-attention funnel (v2's reduce→cross stages) is *not* worth it** — it
+   adds parameters and slightly hurts vs the plain feature-funnel head.
 
 ## Reproduce
 
@@ -78,10 +92,13 @@ python PXIbench_test/seed_sweep.py
 # same sweep but several configs run concurrently on one GPU (much faster)
 python PXIbench_test/seed_sweep_parallel.py --workers 3
 
+# base sweep (10 seeds, parallel) -> heads/seed_sweep_base.json
+python PXIbench_test/seed_sweep_parallel.py --models base_h64 --workers 3 --out seed_sweep_base.json
+
 # a single config/seed by hand (paths resolve relative to PXIbench_test/, so use heads/...)
-python PXIbench_test/test_latent_query_model.py    --model v1 --epochs 800 --seed 42
-python PXIbench_test/test_latent_query_model_v2.py             --epochs 800 --seed 42
-python PXIbench_test/test_latent_query_model_v2.py --hidden-dim 56 --epochs 800 --seed 42
+python PXIbench_test/test_latent_query_model.py --model v1   --epochs 800 --seed 42
+python PXIbench_test/test_latent_query_model.py --model v2   --epochs 800 --seed 42
+python PXIbench_test/test_latent_query_model.py --model base --epochs 800 --seed 42
 ```
 
 ## Caveats
