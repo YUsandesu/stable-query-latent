@@ -23,6 +23,7 @@ pseudo_text_data_multi.csv
 /game_review_data/game_review_cleaned_3
 /game_review_data/game_review_cleaned_3_sentences
 /game_review_data/game_review_cleaned_3_sentence_embeddings
+/VICReg_review/heads
 
 # PXI benchmark experiment data
 /PXIbench_test/PXIbenchmark_data
