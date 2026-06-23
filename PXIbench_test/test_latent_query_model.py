@@ -13,15 +13,19 @@ from torch.utils.data import DataLoader, Dataset
 
 from latent_query_model import LatentQueryFlatRegressor
 from latent_query_model_v2 import LatentQueryFunnelRegressor
+from PXIbench_test.latent_query_model_mlp import LatentQueryBaseRegressor
 
 
 SCORE_CLASS_COUNT = 5
 
-# Selectable architectures. v1 = original (one learnable latent array per stage);
-# v2 = single learnable array + self-attention, later queries are linear reductions.
+# Selectable architectures.
+#   v1   = original (one learnable latent array per stage)
+#   v2   = single learnable array + self-attention, later queries are linear reductions
+#   base = ablation: only the first latent array + self-attention, then an MLP funnel
 MODEL_REGISTRY = {
     "v1": LatentQueryFlatRegressor,
     "v2": LatentQueryFunnelRegressor,
+    "base": LatentQueryBaseRegressor,
 }
 
 
