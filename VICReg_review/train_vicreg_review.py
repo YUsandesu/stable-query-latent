@@ -204,7 +204,7 @@ def write_manifest(path, status, args, epoch, step, metrics=None, error=None):
     atomic_text_write(json.dumps(payload, ensure_ascii=False, indent=2), path)
 
 
-def make_loader(args, device):
+def make_loader(args, device, loader_batch_size=None):
     dataset = GameReviewVicRegDataset(
         args.input_dir,
         sample_fraction=args.sample_fraction,
@@ -212,10 +212,11 @@ def make_loader(args, device):
         cache_games=args.cache_games,
         limit_games=args.limit_games,
     )
+    loader_batch_size = loader_batch_size or args.batch_size
     pin_memory = device.type == "cuda"
     loader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=loader_batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
@@ -235,8 +236,13 @@ def next_batch(loader, iterator):
 def train(args):
     torch.manual_seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    dataset, loader = make_loader(args, device)
-    steps_per_epoch = args.steps_per_epoch or len(loader)
+    loader_batch_size = 1 if args.sequential_game_batch else args.batch_size
+    dataset, loader = make_loader(args, device, loader_batch_size=loader_batch_size)
+    if args.sequential_game_batch:
+        default_steps_per_epoch = math.ceil(len(dataset) / args.batch_size)
+    else:
+        default_steps_per_epoch = len(loader)
+    steps_per_epoch = args.steps_per_epoch or default_steps_per_epoch
 
     model = LatentArrayMLP(
         input_dim=args.input_dim,
@@ -262,6 +268,7 @@ def train(args):
 
     print(
         f"device={device} games={len(dataset)} batch_size={args.batch_size} "
+        f"loader_batch_size={loader_batch_size} sequential_game_batch={args.sequential_game_batch} "
         f"steps_per_epoch={steps_per_epoch} sample_fraction={args.sample_fraction} "
         f"max_sentences={args.max_sentences}"
     )
@@ -276,16 +283,43 @@ def train(args):
             epoch_sums = {}
 
             for step in range(1, steps_per_epoch + 1):
-                batch, iterator = next_batch(loader, iterator)
-                view_a = batch["view_a"].to(device, non_blocking=pin_memory)
-                mask_a = batch["mask_a"].to(device, non_blocking=pin_memory)
-                view_b = batch["view_b"].to(device, non_blocking=pin_memory)
-                mask_b = batch["mask_b"].to(device, non_blocking=pin_memory)
-
                 optimizer.zero_grad(set_to_none=True)
+                if args.sequential_game_batch:
+                    z_a_parts = []
+                    z_b_parts = []
+                    len_a_parts = []
+                    len_b_parts = []
+                    games = []
+                    for _ in range(args.batch_size):
+                        batch, iterator = next_batch(loader, iterator)
+                        view_a = batch["view_a"].to(device, non_blocking=pin_memory)
+                        mask_a = batch["mask_a"].to(device, non_blocking=pin_memory)
+                        view_b = batch["view_b"].to(device, non_blocking=pin_memory)
+                        mask_b = batch["mask_b"].to(device, non_blocking=pin_memory)
+                        with torch.amp.autocast("cuda", enabled=amp_enabled):
+                            z_a_parts.append(model(view_a, key_padding_mask=mask_a))
+                            z_b_parts.append(model(view_b, key_padding_mask=mask_b))
+                        len_a_parts.append(batch["len_a"])
+                        len_b_parts.append(batch["len_b"])
+                        games.extend(batch["games"])
+                    z_a = torch.cat(z_a_parts, dim=0)
+                    z_b = torch.cat(z_b_parts, dim=0)
+                    len_a = torch.cat(len_a_parts, dim=0)
+                    len_b = torch.cat(len_b_parts, dim=0)
+                else:
+                    batch, iterator = next_batch(loader, iterator)
+                    view_a = batch["view_a"].to(device, non_blocking=pin_memory)
+                    mask_a = batch["mask_a"].to(device, non_blocking=pin_memory)
+                    view_b = batch["view_b"].to(device, non_blocking=pin_memory)
+                    mask_b = batch["mask_b"].to(device, non_blocking=pin_memory)
+                    games = batch["games"]
+                    len_a = batch["len_a"]
+                    len_b = batch["len_b"]
+                    with torch.amp.autocast("cuda", enabled=amp_enabled):
+                        z_a = model(view_a, key_padding_mask=mask_a)
+                        z_b = model(view_b, key_padding_mask=mask_b)
+
                 with torch.amp.autocast("cuda", enabled=amp_enabled):
-                    z_a = model(view_a, key_padding_mask=mask_a)
-                    z_b = model(view_b, key_padding_mask=mask_b)
                     vic = vicreg_loss(
                         z_a,
                         z_b,
@@ -318,15 +352,15 @@ def train(args):
                     "sentiment_entropy": float(
                         (stats_a["sentiment_entropy"] + stats_b["sentiment_entropy"]).mul(0.5).cpu()
                     ),
-                    "sentences_a": float(batch["len_a"].float().mean().item()),
-                    "sentences_b": float(batch["len_b"].float().mean().item()),
+                    "sentences_a": float(len_a.float().mean().item()),
+                    "sentences_b": float(len_b.float().mean().item()),
                 }
                 last_metrics = metrics
                 for key, value in metrics.items():
                     epoch_sums[key] = epoch_sums.get(key, 0.0) + value
 
                 if step == 1 or step % args.log_every == 0:
-                    game_text = ",".join(batch["games"][:3])
+                    game_text = ",".join(games[:3])
                     print(
                         f"epoch={epoch:03d} step={step:04d}/{steps_per_epoch} "
                         f"loss={metrics['loss']:.4f} vic={metrics['vicreg']:.4f} "
@@ -400,6 +434,15 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--steps-per-epoch", type=int, default=0, help="0 means one pass over game files.")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--sequential-game-batch",
+        action="store_true",
+        help=(
+            "Use --batch-size as the number of games per VICReg loss while "
+            "forwarding one full game at a time. This keeps VICReg statistics "
+            "large without padding huge games together."
+        ),
+    )
     parser.add_argument("--sample-fraction", type=float, default=0.6)
     parser.add_argument("--max-sentences", type=int, default=4096, help="0 disables the sentence cap after review sampling.")
     parser.add_argument("--cache-games", type=int, default=1)
