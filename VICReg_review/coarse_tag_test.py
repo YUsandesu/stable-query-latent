@@ -22,46 +22,11 @@ for p in (str(ROOT), str(ROOT / "game_review_data")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from VICReg_review.coarse_tags import COARSE_TAG_ALIASES, coarse_names, coarse_vector, keyword_scores  # noqa: E402
 from VICReg_review.train_tag_probe import load_frozen_encoder, pool_features  # noqa: E402
 
-COARSE = {
-    "Deckbuilder": ["Card Game", "Card Battler", "Deckbuilding"],
-    "Roguelike": ["Rogue-like", "Rogue-lite", "Action Roguelike"],
-    "Turn-Based": ["Turn-Based", "Turn-Based Strategy", "Turn-Based Combat", "Turn-Based Tactics"],
-    "RPG": ["RPG", "Action RPG", "JRPG", "CRPG", "Tactical RPG", "Strategy RPG", "Party-Based RPG"],
-    "Shooter": ["Shooter", "FPS", "Third-Person Shooter", "Looter Shooter"],
-    "Strategy": ["Strategy", "RTS", "Grand Strategy", "4X", "Real Time Tactics", "Tower Defense", "Wargame", "Tactical"],
-    "Simulation": ["Simulation", "Management", "Resource Management", "City Builder", "Colony Sim", "Base-Building",
-                   "Building", "Farming Sim", "Life Sim", "Automobile Sim", "Space Sim", "Automation", "Agriculture"],
-    "Fighting": ["Fighting", "Beat 'em up", "3D Fighter", "Spectacle fighter", "Hack and Slash",
-                 "Character Action Game", "Martial Arts", "Swordplay"],
-    "Platformer": ["Platformer", "2D Platformer", "3D Platformer", "Metroidvania", "Parkour"],
-    "Racing": ["Racing", "Driving", "Vehicular Combat", "Tanks"],
-    "Survival/Sandbox": ["Survival", "Open World Survival Craft", "Sandbox", "Crafting", "Open World",
-                         "Exploration", "Hunting", "Fishing", "Mining"],
-    "Action-Adventure": ["Action", "Adventure", "Action-Adventure", "Combat"],
-    "Co-op/MP": ["Co-op", "Online Co-Op", "Multiplayer", "Massively Multiplayer", "MMORPG", "PvP", "PvE",
-                 "Team-Based", "Class-Based", "Local Co-Op", "Co-op Campaign", "Local Multiplayer",
-                 "Split Screen", "Competitive"],
-    "Narrative": ["Visual Novel", "Interactive Fiction", "Story Rich", "Narrative", "Choices Matter",
-                  "Multiple Endings", "Choose Your Own Adventure", "Text-Based", "Conversation", "Narration",
-                  "Walking Simulator", "Point & Click", "Lore-Rich"],
-    "Puzzle": ["Puzzle"],
-    "Stealth": ["Stealth", "Immersive Sim"],
-    "Bullet Hell": ["Bullet Hell"],
-    "Dungeon Crawler": ["Dungeon Crawler"],
-    "Sci-fi": ["Sci-fi", "Cyberpunk", "Futuristic", "Space", "Robots", "Aliens", "Dystopian", "Post-apocalyptic"],
-    "Fantasy": ["Fantasy", "Dark Fantasy", "Magic", "Dragons", "Mythology", "Medieval", "Gothic"],
-    "Horror": ["Horror", "Survival Horror", "Psychological Horror", "Zombies", "Demons", "Vampire", "Supernatural"],
-    "Historical/War": ["Historical", "Military", "War", "World War II", "Alternate History"],
-    "Crime/Mystery": ["Crime", "Detective", "Mystery", "Assassin", "Political"],
-    "Romance": ["Romance", "Dating Sim"],
-    "Sports": ["Sports"],
-    "Rhythm": ["Rhythm"],
-    "Indie": ["Indie"],
-    "Procedural": ["Procedural Generation"],
-}
-COARSE_NAMES = list(COARSE)
+COARSE = COARSE_TAG_ALIASES
+COARSE_NAMES = coarse_names()
 GAMES_JSON = ROOT / "game_review_data" / "Steam Games Metadata and Player Reviews (2020–2024" / "games.json"
 TESTS = [("AO_text.txt", "1385380", "Across the Obelisk"), ("2077_text.txt", "1091500", "Cyberpunk 2077")]
 
@@ -73,15 +38,6 @@ def l2(x):
 def split(t):
     parts = re.split(r"(?:\r?\n)+|(?<=[.!?。！？；;])\s*", str(t).strip())
     return [p.strip() for p in parts if p.strip()]
-
-
-def coarse_vector(fine_tags):
-    """fine_tags: set of fine tag names -> multi-hot over COARSE_NAMES."""
-    v = np.zeros(len(COARSE_NAMES), dtype=np.int8)
-    for ci, name in enumerate(COARSE_NAMES):
-        if any(ft in fine_tags for ft in COARSE[name]):
-            v[ci] = 1
-    return v
 
 
 def micro_prf(pred, true):
@@ -137,6 +93,11 @@ def predict_desc(clfs, x):
     for c, clf in clfs.items():
         probs[c] = clf.predict_proba(x[None, :])[0, 1]
     return probs
+
+
+def blend_keywords(text, probs, weight=0.6):
+    prior = keyword_scores(text, COARSE_NAMES)
+    return (1.0 - weight) * probs + weight * prior
 
 
 def score_desc(name, true_coarse, probs, K):
@@ -207,15 +168,20 @@ def main():
 
     clfs_raw, clfs_vic = fit_full(F_raw, Y), fit_full(F_vic, Y)
     for path, appid, name in TESTS:
-        true_fine = set(t for t in games[appid].get("tags", {}) if t in set(fine_tags))
+        true_fine = set(games[appid].get("tags", {}))
         true_coarse = set(COARSE_NAMES[i] for i, v in enumerate(coarse_vector(true_fine)) if v)
+        text = Path(ROOT / path).read_text(encoding="utf-8")
         raw_feat, vic_feat = desc_features(path)
         K = len(true_coarse)
         print(f"\n=== {name} ===  true coarse: {sorted(true_coarse)}")
         print(" raw-L2 probe:")
         score_desc("raw", true_coarse, predict_desc(clfs_raw, raw_feat), K)
+        print(" raw-L2 + keyword probe:")
+        score_desc("raw+kw", true_coarse, blend_keywords(text, predict_desc(clfs_raw, raw_feat)), K)
         print(" vicreg-L2 probe:")
         score_desc("vicreg", true_coarse, predict_desc(clfs_vic, vic_feat), K)
+        print(" vicreg-L2 + keyword probe:")
+        score_desc("vicreg+kw", true_coarse, blend_keywords(text, predict_desc(clfs_vic, vic_feat)), K)
 
 
 if __name__ == "__main__":

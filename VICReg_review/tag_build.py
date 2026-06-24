@@ -35,6 +35,11 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+try:
+    from VICReg_review.coarse_tags import COARSE_TAG_ALIASES, coarsen_tag_dict, coarse_names
+except ImportError:  # pragma: no cover - allows direct script execution
+    from coarse_tags import COARSE_TAG_ALIASES, coarsen_tag_dict, coarse_names
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
@@ -128,12 +133,32 @@ SUBJECTIVE = [
 ]
 
 
-def build_tag_groups(vocab_tags):
+def build_tag_groups(vocab_tags, granularity="fine"):
     """Partition the kept vocab into mechanics / story / subjective / drop.
 
     content = mechanics + story. Returns a dict of name -> ordered tag list,
     restricted to tags actually in the vocab.
     """
+    if granularity == "coarse":
+        mechanics = [tag for tag in coarse_names() if tag in set(vocab_tags)]
+        story_names = {
+            "Narrative/Choices",
+            "Sci-fi/Cyberpunk",
+            "Fantasy",
+            "Horror",
+            "Historical/War",
+            "Crime/Mystery",
+        }
+        story = [tag for tag in mechanics if tag in story_names]
+        mechanics = [tag for tag in mechanics if tag not in story_names]
+        return {
+            "mechanics": mechanics,
+            "story": story,
+            "subjective": [],
+            "content": mechanics + story,
+            "drop": [tag for tag in vocab_tags if tag not in set(mechanics) | set(story)],
+        }
+
     valid = set(vocab_tags)
 
     def clean(names):
@@ -156,7 +181,7 @@ def build_tag_groups(vocab_tags):
     }
 
 
-def build_test_games(game_names, appids, games, vocab_tags, subjective_set):
+def build_test_games(game_names, appids, games, vocab_tags, subjective_set, granularity="fine"):
     """In-domain game pool: games.json INTERSECT the training set, with emotional
     (subjective) tags dropped and tags restricted to the vocab.
 
@@ -173,9 +198,15 @@ def build_test_games(game_names, appids, games, vocab_tags, subjective_set):
         record = dict(games[appid])  # shallow copy; don't mutate loaded games.json
         raw_tags = record.get("tags") or {}
         if isinstance(raw_tags, dict):
-            record["tags"] = {t: c for t, c in raw_tags.items() if t in keep_set}
+            if granularity == "coarse":
+                record["tags"] = coarsen_tag_dict(raw_tags, keep_set)
+            else:
+                record["tags"] = {t: c for t, c in raw_tags.items() if t in keep_set}
         else:
-            record["tags"] = {t: 1 for t in raw_tags if t in keep_set}
+            raw = {t: 1 for t in raw_tags}
+            record["tags"] = coarsen_tag_dict(raw, keep_set) if granularity == "coarse" else {
+                t: 1 for t in raw_tags if t in keep_set
+            }
         test_games[appid] = record
     return test_games, keep_tags
 
@@ -197,6 +228,8 @@ def build(args):
     for appid in appids:
         record = games.get(appid, {})
         tags = game_tag_dict(record, args.source)
+        if args.source == "tags" and args.tag_granularity == "coarse":
+            tags = coarsen_tag_dict(tags)
         per_game_tags.append(tags)
         for tag in tags:
             document_frequency[tag] += 1
@@ -242,6 +275,8 @@ def build(args):
         "num_tags": num_tags,
         "target_mode": args.target_mode,
         "source": args.source,
+        "tag_granularity": args.tag_granularity,
+        "coarse_aliases": {name: COARSE_TAG_ALIASES[name] for name in kept if name in COARSE_TAG_ALIASES},
         "min_count": args.min_count,
         "top_k": args.top_k,
         "num_games": len(game_names),
@@ -292,7 +327,7 @@ def build(args):
             print(f"skip groups/test_games: only built for --source tags (got {args.source})")
         return
 
-    groups = build_tag_groups(kept)
+    groups = build_tag_groups(kept, args.tag_granularity)
     if not args.no_groups:
         atomic_write_bytes(
             lambda tmp: tmp.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8"),
@@ -304,7 +339,9 @@ def build(args):
 
     if not args.no_test_games:
         subjective_set = set(groups["subjective"])
-        test_games, keep_tags = build_test_games(game_names, appids, games, kept, subjective_set)
+        test_games, keep_tags = build_test_games(
+            game_names, appids, games, kept, subjective_set, args.tag_granularity
+        )
         atomic_write_bytes(
             lambda tmp: tmp.write_text(json.dumps(test_games, ensure_ascii=False, indent=2), encoding="utf-8"),
             out_dir / "test_games.json",
@@ -341,6 +378,12 @@ def parse_args():
         help="If > 0, keep only the K most frequent tags instead of using --min-count.",
     )
     parser.add_argument("--target-mode", choices=["binary", "weight"], default="binary")
+    parser.add_argument(
+        "--tag-granularity",
+        choices=["fine", "coarse"],
+        default="fine",
+        help="Use the original Steam tags or merge them into description-facing coarse families.",
+    )
     parser.add_argument("--no-groups", action="store_true",
                         help="Skip writing tag_groups.json (mechanics/story/subjective/drop).")
     parser.add_argument("--no-test-games", action="store_true",

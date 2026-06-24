@@ -48,6 +48,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from VICReg_review.model import LatentArrayMLP  # noqa: E402
 from VICReg_review.train_vicreg_review_h5 import load_game_views  # noqa: E402
+try:
+    from VICReg_review.coarse_tags import COARSE_TAG_ALIASES
+except ImportError:  # pragma: no cover - allows direct script execution
+    from coarse_tags import COARSE_TAG_ALIASES
 
 DEFAULT_H5 = SCRIPT_DIR / "h5" / "game_review_cleaned_3_sentences.h5"
 DEFAULT_CHECKPOINT = SCRIPT_DIR / "heads" / "vicreg_review_h5_best.pt"
@@ -142,6 +146,11 @@ def pool_features(feats, pool):
     raise ValueError(f"unknown pool: {pool}")
 
 
+def l2_normalize(X, eps=1e-8):
+    X = np.asarray(X, dtype=np.float32)
+    return X / (np.linalg.norm(X, axis=1, keepdims=True) + eps)
+
+
 def load_labels(tags_dir):
     vocab = json.loads((Path(tags_dir) / "tag_vocab.json").read_text(encoding="utf-8"))
     npz = np.load(Path(tags_dir) / "tag_labels.npz", allow_pickle=True)
@@ -180,7 +189,6 @@ def micro_prf(tp, fp, fn):
 
 def cross_validate(X, y, tags, args):
     from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
 
     n, num_tags = y.shape
     per_tag_tp = np.zeros(num_tags)
@@ -190,8 +198,7 @@ def cross_validate(X, y, tags, args):
     fold_f1s = []
 
     for fold, (tr, va) in enumerate(kfold_indices(n, args.folds, args.seed)):
-        scaler = StandardScaler().fit(X[tr])
-        Xtr, Xva = scaler.transform(X[tr]), scaler.transform(X[va])
+        Xtr, Xva = l2_normalize(X[tr], args.norm_eps), l2_normalize(X[va], args.norm_eps)
         f_tp = f_fp = f_fn = 0.0
         learnable = 0
         for t in range(num_tags):
@@ -267,10 +274,8 @@ def export_linear_probe(X, y, tags, doc_freq, args, encoder_path):
     artifact carries no sklearn dependency: inference is sigmoid(x_std @ W.T + b).
     """
     from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
 
-    scaler = StandardScaler().fit(X)
-    Xs = scaler.transform(X)
+    Xs = l2_normalize(X, args.norm_eps)
     num_tags = y.shape[1]
     coef = np.zeros((num_tags, X.shape[1]), dtype=np.float32)
     intercept = np.zeros(num_tags, dtype=np.float32)
@@ -307,18 +312,24 @@ def export_linear_probe(X, y, tags, doc_freq, args, encoder_path):
         "kind": "linear_tag_probe",
         "encoder_checkpoint": str(Path(encoder_path).resolve()),
         "tags": list(tags),
+        "normalizer": "l2",
+        "norm_eps": float(args.norm_eps),
         "pool": args.pool,
         "feature_views": args.feature_views,
         "sample_fraction": args.sample_fraction,
         "C": args.C,
-        "scaler_mean": scaler.mean_.astype(np.float32),
-        "scaler_scale": scaler.scale_.astype(np.float32),
+        # Backward-compatible identity fields for older readers. New readers use
+        # normalizer=l2 and ignore these.
+        "scaler_mean": np.zeros(X.shape[1], dtype=np.float32),
+        "scaler_scale": np.ones(X.shape[1], dtype=np.float32),
         "coef": coef,
         "intercept": intercept,
         "threshold": threshold,
         "trained_mask": trained,
         "content_mask": content_mask,
         "doc_freq": doc_freq.astype(np.int32),
+        "coarse_aliases": {tag: COARSE_TAG_ALIASES[tag] for tag in tags if tag in COARSE_TAG_ALIASES},
+        "keyword_weight": float(args.keyword_weight),
     }
     torch.save(artifact, args.export_head)
     print(f"exported deployable linear probe ({int(trained.sum())}/{num_tags} tags fit) -> {args.export_head}",
@@ -368,6 +379,7 @@ def run(args):
         "folds": args.folds,
         "min_train_pos": args.min_train_pos,
         "pool": args.pool,
+        "normalizer": "l2",
         "classifier": "per_tag_logreg_balanced",
         "C": args.C,
         "feature_views": args.feature_views,
@@ -412,6 +424,9 @@ def parse_args():
     parser.add_argument("--min-train-pos", type=int, default=2,
                         help="A tag is scored on a fold only if it has >= this many train positives.")
     parser.add_argument("--C", type=float, default=1.0, help="Inverse L2 strength for per-tag logistic regression.")
+    parser.add_argument("--norm-eps", type=float, default=1e-8, help="Epsilon for row-wise L2 probe normalization.")
+    parser.add_argument("--keyword-weight", type=float, default=0.6,
+                        help="Inference-time lexical prior weight for coarse real-description probes.")
     parser.add_argument("--freq-floors", type=int, nargs="*", default=[5, 10, 20, 30, 40, 60, 80])
     parser.add_argument("--device", default=None)
     parser.add_argument("--amp", action="store_true")

@@ -34,8 +34,11 @@ lab_idx = {n: i for i, n in enumerate(lab_names)}
 
 def predict_one(feats):  # mirrors validation.PredictorWorker.predict
     pooled = pool_features(feats[None, ...], artifact["pool"])[0]
-    x_std = (pooled - artifact["scaler_mean"]) / artifact["scaler_scale"]
-    logits = x_std @ artifact["coef"].T + artifact["intercept"]
+    if artifact.get("normalizer", "standard") == "l2":
+        x_probe = pooled / (np.linalg.norm(pooled) + float(artifact.get("norm_eps", 1e-8)))
+    else:
+        x_probe = (pooled - artifact["scaler_mean"]) / artifact["scaler_scale"]
+    logits = x_probe @ artifact["coef"].T + artifact["intercept"]
     probs = 1.0 / (1.0 + np.exp(-logits))
     return np.where(artifact["trained_mask"], probs, 0.0).astype(np.float32)
 

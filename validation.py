@@ -3,14 +3,14 @@
 Pipeline (aligned with the current train_tag_probe.py method):
 
     input text -> local Qwen embedding -> frozen VICReg encoder -> (num_latents,
-    output_dim) code -> pool (flatten/stats) -> standardize -> per-tag linear
+    output_dim) code -> pool (flatten/stats) -> normalize -> per-tag linear
     logistic probe -> per-tag probabilities sorted high to low.
 
 The probe is the portable linear artifact produced by:
 
     train_tag_probe.py --export-head VICReg_review/heads/tag_probe_linear.pt
 
-(scaler + per-tag logistic weights; same method as the cross-validation, fit on
+(normalizer + per-tag logistic weights; same method as the cross-validation, fit on
 all games). The artifact stores which encoder checkpoint it was fit on, so this UI
 loads that exact encoder by default to keep features consistent.
 
@@ -39,6 +39,10 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from game_review_data.embedding_data import DEFAULT_LOCAL_MODEL, LocalEmbedder  # noqa: E402
 from VICReg_review.train_tag_probe import load_frozen_encoder, pool_features  # noqa: E402
+try:
+    from VICReg_review.coarse_tags import coarsen_tag_dict, keyword_scores
+except ImportError:  # pragma: no cover
+    from coarse_tags import coarsen_tag_dict, keyword_scores
 
 
 DEFAULT_HEADS_DIR = ROOT / "VICReg_review" / "heads"
@@ -91,7 +95,7 @@ def game_tag_dict(record: dict) -> dict[str, float]:
     return {str(name): 1.0 for name in tags}
 
 
-def build_game_index(games_json: Path, tags: list[str]):
+def build_game_index(games_json: Path, tags: list[str], coarse: bool = False):
     import numpy as np
 
     payload = json.loads(Path(games_json).read_text(encoding="utf-8"))
@@ -106,6 +110,8 @@ def build_game_index(games_json: Path, tags: list[str]):
             continue
         vector = np.zeros(len(tags), dtype=np.float32)
         raw_tags = game_tag_dict(record)
+        if coarse:
+            raw_tags = coarsen_tag_dict(raw_tags)
         if not raw_tags:
             continue
         max_weight = max(raw_tags.values()) if raw_tags else 1.0
@@ -222,7 +228,9 @@ class PredictorWorker(QtCore.QObject):
             self.keep_mask = self._build_tag_keep_mask()
 
             self.status.emit("loading game table")
-            self.game_appids, self.game_names, self.game_matrix, self.game_norms = build_game_index(games_json, self.tags)
+            self.game_appids, self.game_names, self.game_matrix, self.game_norms = build_game_index(
+                games_json, self.tags, bool(probe.get("coarse_aliases"))
+            )
             self.encoder_path = encoder_path
             self.head_path = head_path
             self.games_json_path = games_json
@@ -297,13 +305,21 @@ class PredictorWorker(QtCore.QObject):
                     codes.append(code.squeeze(0).float())
             feats = torch.stack(codes, dim=0).mean(dim=0).cpu().numpy()  # (num_latents, output_dim)
 
-            # Pool + standardize + per-tag logistic exactly as train_tag_probe does.
+            # Pool + normalize + per-tag logistic exactly as train_tag_probe does.
             pooled = pool_features(feats[None, ...], self.probe["pool"])[0]
-            x_std = (pooled - self.probe["scaler_mean"]) / self.probe["scaler_scale"]
-            x_std = np.clip(x_std, -10.0, 10.0)  # guard against any tiny-variance dim blow-up
-            logits = x_std @ self.probe["coef"].T + self.probe["intercept"]
+            if self.probe.get("normalizer", "standard") == "l2":
+                x_probe = pooled / (np.linalg.norm(pooled) + float(self.probe.get("norm_eps", 1e-8)))
+            else:
+                x_probe = (pooled - self.probe["scaler_mean"]) / self.probe["scaler_scale"]
+                x_probe = np.clip(x_probe, -10.0, 10.0)
+            logits = x_probe @ self.probe["coef"].T + self.probe["intercept"]
             probs = 1.0 / (1.0 + np.exp(-logits))
             probs = np.where(self.probe["trained_mask"], probs, 0.0).astype(np.float32)
+            keyword_weight = float(self.probe.get("keyword_weight", 0.0) or 0.0)
+            if keyword_weight > 0 and self.probe.get("coarse_aliases"):
+                prior = keyword_scores(text, self.tags)
+                keyword_weight = min(max(keyword_weight, 0.0), 1.0)
+                probs = ((1.0 - keyword_weight) * probs + keyword_weight * prior).astype(np.float32)
             presence_scores = probs.tolist()
 
             keep = self.keep_mask if self.keep_mask is not None else np.ones(len(self.tags), dtype=bool)
