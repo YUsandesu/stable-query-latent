@@ -37,6 +37,7 @@ if str(GAME_REVIEW_DATA) not in sys.path:
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from backheads.model import RecommendationRateHead  # noqa: E402
 from game_review_data.embedding_data import DEFAULT_LOCAL_MODEL, LocalEmbedder  # noqa: E402
 from VICReg_review.train_tag_probe import load_frozen_encoder, pool_features  # noqa: E402
 try:
@@ -50,6 +51,11 @@ DEFAULT_GUI_RUN_DIR = DEFAULT_HEADS_DIR / "gui_run"
 DEFAULT_TAGS_DIR = ROOT / "VICReg_review" / "tags"
 DEFAULT_H5 = ROOT / "VICReg_review" / "h5" / "game_review_cleaned_3_sentences.h5"
 DEFAULT_GAMES_JSON = ROOT / "game_review_data" / "Steam Games Metadata and Player Reviews (2020–2024" / "games.json"
+DEFAULT_RECOMMENDATION_HEAD = ROOT / "backheads" / "heads" / "recommendation_head.pt"
+DEFAULT_LINEAR_RECOMMENDATION_PROBE = ROOT / "backheads" / "heads" / "recommendation_linear_probe.pt"
+DEFAULT_VICREG_RECOMMENDATION_PROBE = ROOT / "backheads" / "heads" / "recommendation_vicreg_linear_probe.pt"
+DEFAULT_RECOMMENDATION_CACHE = ROOT / "backheads" / "heads" / "recommendation_features_mean_std.npz"
+DEFAULT_VICREG_RECOMMENDATION_CACHE = ROOT / "backheads" / "heads" / "recommendation_vicreg_features.npz"
 
 
 def newest_existing(patterns: list[str]) -> Path | None:
@@ -79,6 +85,21 @@ def split_text(text: str, max_sentences: int) -> list[str]:
     if not sentences and text.strip():
         sentences = [text.strip()]
     return sentences[:max_sentences]
+
+
+def summarize_recommendation_vectors(vectors, mode: str):
+    import numpy as np
+
+    vectors = np.asarray(vectors, dtype=np.float32)
+    mean = vectors.mean(axis=0)
+    std = vectors.std(axis=0)
+    if mode == "mean":
+        return mean
+    if mode == "mean_std":
+        return np.concatenate([mean, std], axis=0)
+    if mode == "mean_std_extrema":
+        return np.concatenate([mean, std, vectors.min(axis=0), vectors.max(axis=0)], axis=0)
+    raise ValueError(f"Unknown recommendation feature mode: {mode}")
 
 
 def game_tag_dict(record: dict) -> dict[str, float]:
@@ -169,8 +190,8 @@ def build_game_index(games_json: Path, tags: list[str], training_h5: Path | None
 
 class PredictorWorker(QtCore.QObject):
     status = QtCore.pyqtSignal(str)
-    ready = QtCore.pyqtSignal(str, str, str, str)
-    result = QtCore.pyqtSignal(list, list, list, int)
+    ready = QtCore.pyqtSignal(str, str, str, str, str)
+    result = QtCore.pyqtSignal(list, list, list, list, int)
     error = QtCore.pyqtSignal(str)
 
     def __init__(self, args: argparse.Namespace):
@@ -181,6 +202,10 @@ class PredictorWorker(QtCore.QObject):
         self.encoder = None
         self.probe = None          # portable linear artifact (dict)
         self.pxi_probe = None      # portable PXI artifact (dict), optional
+        self.recommendation_head = None
+        self.recommendation_checkpoint = None
+        self.recommendation_cache = None
+        self.recommendation_head_path = None
         self.keep_mask = None      # which tags to predict/match (per --tag-filter)
         self.tags = []
         self.encoder_path = None
@@ -274,6 +299,34 @@ class PredictorWorker(QtCore.QObject):
                 if isinstance(pxi_probe, dict) and pxi_probe.get("kind") == "linear_pxi_probe":
                     self.pxi_probe = pxi_probe
                     self.pxi_head_path = Path(pxi_head_path)
+
+            self.recommendation_head = None
+            self.recommendation_checkpoint = None
+            self.recommendation_cache = None
+            self.recommendation_head_path = None
+            recommendation_head_path = Path(self.args.recommendation_head)
+            if not recommendation_head_path.is_absolute():
+                recommendation_head_path = ROOT / recommendation_head_path
+            recommendation_cache_path = Path(self.args.recommendation_cache)
+            if not recommendation_cache_path.is_absolute():
+                recommendation_cache_path = ROOT / recommendation_cache_path
+            if recommendation_head_path.exists() and recommendation_cache_path.exists():
+                self.status.emit("loading recommendation head")
+                rec_ckpt = torch.load(recommendation_head_path, map_location="cpu", weights_only=False)
+                if rec_ckpt.get("kind") in ("linear_recommendation_probe", "vicreg_linear_recommendation_probe"):
+                    self.recommendation_head = "linear"
+                else:
+                    rec_head = RecommendationRateHead(
+                        input_dim=int(rec_ckpt["input_dim"]),
+                        hidden_dims=tuple(rec_ckpt["hidden_dims"]),
+                        dropout=float(rec_ckpt["dropout"]),
+                    )
+                    rec_head.load_state_dict(rec_ckpt["state_dict"])
+                    rec_head.eval()
+                    self.recommendation_head = rec_head
+                self.recommendation_checkpoint = rec_ckpt
+                self.recommendation_cache = self._load_recommendation_cache(recommendation_cache_path)
+                self.recommendation_head_path = recommendation_head_path
             self.tags = list(probe.get("tags") or [])
             if not self.tags:
                 self.tags = [f"tag_{index}" for index in range(len(probe["intercept"]))]
@@ -292,10 +345,21 @@ class PredictorWorker(QtCore.QObject):
                 str(head_path),
                 f"{games_path} ({len(self.game_appids)} VICReg-training games)",
                 str(self.pxi_head_path) if self.pxi_head_path else "",
+                str(self.recommendation_head_path) if self.recommendation_head_path else "",
             )
             self.status.emit("ready")
         except BaseException as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
+
+    def _load_recommendation_cache(self, path: Path) -> dict:
+        import numpy as np
+
+        data = np.load(path, allow_pickle=True)
+        cache = {key: data[key] for key in data.files}
+        cache["appid_to_index"] = {
+            str(appid): index for index, appid in enumerate(cache.get("appids", []))
+        }
+        return cache
 
     def _build_tag_keep_mask(self):
         """Which tags to predict/match, per --tag-filter.
@@ -380,12 +444,94 @@ class PredictorWorker(QtCore.QObject):
             rows.sort(key=lambda item: item[1], reverse=True)
             game_rows = self.match_games(presence_scores)
             pxi_rows = self.predict_pxi(feats)
+            recommendation_rows = self.predict_recommendation(vectors, feats, game_rows)
             if self.args.top_k > 0:
                 rows = rows[: self.args.top_k]
-            self.result.emit(rows, game_rows, pxi_rows, len(sentences))
+            self.result.emit(rows, game_rows, pxi_rows, recommendation_rows, len(sentences))
             self.status.emit("ready")
         except BaseException as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
+
+    def predict_recommendation(
+        self,
+        vectors,
+        feats,
+        game_rows: list[tuple[str, str, float, str]],
+    ) -> list[tuple[str, str, str, float | None, float, float, float | None, float | None]]:
+        import numpy as np
+        import torch
+
+        if not self.recommendation_head or not self.recommendation_checkpoint:
+            return []
+        ckpt = self.recommendation_checkpoint
+        if ckpt.get("kind") == "vicreg_linear_recommendation_probe":
+            feature = pool_features(feats[None, ...], ckpt.get("pool", "stats"))[0].astype(np.float32)
+        else:
+            feature_mode = str(ckpt.get("feature_mode", "mean_std"))
+            feature = summarize_recommendation_vectors(vectors, feature_mode)
+        text_rates = self._predict_recommendation_rates(feature)
+
+        rows = [
+            (
+                "当前输入",
+                "",
+                "输入文本",
+                None,
+                float(text_rates[0]),
+                float(text_rates[1]),
+                None,
+                None,
+            )
+        ]
+        cache = self.recommendation_cache or {}
+        appid_to_index = cache.get("appid_to_index") or {}
+        if not appid_to_index:
+            return rows
+
+        max_rows = max(1, int(self.args.recommendation_top_k))
+        for appid, name, similarity, _ in game_rows[:max_rows]:
+            index = appid_to_index.get(str(appid))
+            if index is None:
+                continue
+            review_feature = cache["X"][index].astype(np.float32)
+            review_rates = self._predict_recommendation_rates(review_feature)
+            true_rates = cache["y"][index].astype(np.float32)
+            rows.append(
+                (
+                    "相似游戏",
+                    str(appid),
+                    str(name),
+                    float(similarity),
+                    float(review_rates[0]),
+                    float(review_rates[1]),
+                    float(true_rates[0]),
+                    float(true_rates[1]),
+                )
+            )
+        return rows
+
+    def _predict_recommendation_rates(self, feature):
+        import numpy as np
+        import torch
+
+        ckpt = self.recommendation_checkpoint
+        feature = np.asarray(feature, dtype=np.float32)
+        feature_mean = ckpt["feature_mean"].astype(np.float32)
+        feature_std = np.maximum(ckpt["feature_std"].astype(np.float32), 1e-6)
+        normalized = (feature - feature_mean) / feature_std
+        if ckpt.get("kind") in ("linear_recommendation_probe", "vicreg_linear_recommendation_probe"):
+            value = float(normalized @ ckpt["coef"].astype(np.float32) + float(ckpt["intercept"]))
+            if ckpt.get("target_transform") == "logit":
+                positive = 1.0 / (1.0 + np.exp(-np.clip(value, -50.0, 50.0)))
+            else:
+                positive = np.clip(value, 0.0, 1.0)
+            return np.asarray([positive, 1.0 - positive], dtype=np.float32)
+        with torch.no_grad():
+            return (
+                self.recommendation_head
+                .predict_rates(torch.from_numpy(normalized.astype(np.float32)).unsqueeze(0))
+                .numpy()[0]
+            )
 
     def predict_pxi(self, feats) -> list[tuple[str, str, float]]:
         import numpy as np
@@ -475,15 +621,18 @@ class ValidationWindow(QtWidgets.QMainWindow):
         self.encoder_label = QtWidgets.QLabel("encoder: auto")
         self.head_label = QtWidgets.QLabel("tag head: auto")
         self.pxi_label = QtWidgets.QLabel("pxi head: auto")
+        self.recommendation_label = QtWidgets.QLabel("recommendation head: auto")
         self.games_label = QtWidgets.QLabel("games: auto")
         self.encoder_label.setWordWrap(True)
         self.head_label.setWordWrap(True)
         self.pxi_label.setWordWrap(True)
+        self.recommendation_label.setWordWrap(True)
         self.games_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         layout.addWidget(self.encoder_label)
         layout.addWidget(self.head_label)
         layout.addWidget(self.pxi_label)
+        layout.addWidget(self.recommendation_label)
         layout.addWidget(self.games_label)
 
         self.text_edit = QtWidgets.QPlainTextEdit()
@@ -535,9 +684,33 @@ class ValidationWindow(QtWidgets.QMainWindow):
         self.pxi_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.pxi_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
 
+        self.recommendation_table = QtWidgets.QTableWidget(0, 8)
+        self.recommendation_table.setHorizontalHeaderLabels(
+            [
+                "Type",
+                "AppID",
+                "Name",
+                "Similarity",
+                "Pred positive",
+                "Pred negative",
+                "True positive",
+                "True negative",
+            ]
+        )
+        self.recommendation_table.verticalHeader().setVisible(False)
+        self.recommendation_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.recommendation_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.recommendation_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.recommendation_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col in range(2, 8):
+            self.recommendation_table.horizontalHeader().setSectionResizeMode(
+                col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+
         self.tabs.addTab(self.table, "标签分数")
         self.tabs.addTab(self.game_table, "最可能游戏")
         self.tabs.addTab(self.pxi_table, "PXI")
+        self.tabs.addTab(self.recommendation_table, "好评率")
         layout.addWidget(self.tabs, stretch=3)
 
     def _build_worker(self) -> None:
@@ -561,11 +734,21 @@ class ValidationWindow(QtWidgets.QMainWindow):
     def set_status(self, text: str) -> None:
         self.status_label.setText(f"status: {text}")
 
-    @QtCore.pyqtSlot(str, str, str, str)
-    def on_ready(self, encoder_path: str, head_path: str, games_path: str, pxi_path: str) -> None:
+    @QtCore.pyqtSlot(str, str, str, str, str)
+    def on_ready(
+        self,
+        encoder_path: str,
+        head_path: str,
+        games_path: str,
+        pxi_path: str,
+        recommendation_path: str,
+    ) -> None:
         self.encoder_label.setText(f"encoder: {encoder_path}")
         self.head_label.setText(f"tag head: {head_path}")
         self.pxi_label.setText(f"pxi head: {pxi_path or 'not loaded'}")
+        self.recommendation_label.setText(
+            f"recommendation head: {recommendation_path or 'not loaded'}"
+        )
         self.games_label.setText(f"games: {games_path}")
         self.load_button.setEnabled(True)
         self.predict_button.setEnabled(True)
@@ -598,6 +781,7 @@ class ValidationWindow(QtWidgets.QMainWindow):
         self.table.setRowCount(0)
         self.game_table.setRowCount(0)
         self.pxi_table.setRowCount(0)
+        self.recommendation_table.setRowCount(0)
         self.set_status("loading selected model")
         self.load_requested.emit(encoder_path, head_path, games_path)
 
@@ -606,11 +790,19 @@ class ValidationWindow(QtWidgets.QMainWindow):
         self.table.setRowCount(0)
         self.game_table.setRowCount(0)
         self.pxi_table.setRowCount(0)
+        self.recommendation_table.setRowCount(0)
         self.set_status("queued")
         self.predict_requested.emit(self.text_edit.toPlainText())
 
-    @QtCore.pyqtSlot(list, list, list, int)
-    def on_result(self, rows: list, game_rows: list, pxi_rows: list, sentence_count: int) -> None:
+    @QtCore.pyqtSlot(list, list, list, list, int)
+    def on_result(
+        self,
+        rows: list,
+        game_rows: list,
+        pxi_rows: list,
+        recommendation_rows: list,
+        sentence_count: int,
+    ) -> None:
         self.count_label.setText(f"sentences: {sentence_count}")
         self.table.setRowCount(len(rows))
         for row_index, (tag, score) in enumerate(rows):
@@ -643,6 +835,26 @@ class ValidationWindow(QtWidgets.QMainWindow):
             self.pxi_table.setItem(row_index, 0, group_item)
             self.pxi_table.setItem(row_index, 1, dim_item)
             self.pxi_table.setItem(row_index, 2, value_item)
+        self.recommendation_table.setRowCount(len(recommendation_rows))
+        for row_index, values in enumerate(recommendation_rows):
+            kind, appid, name, similarity, pred_pos, pred_neg, true_pos, true_neg = values
+            display_values = [
+                str(kind),
+                str(appid),
+                str(name),
+                "" if similarity is None else f"{float(similarity):.6f}",
+                f"{float(pred_pos):.6f}",
+                f"{float(pred_neg):.6f}",
+                "" if true_pos is None else f"{float(true_pos):.6f}",
+                "" if true_neg is None else f"{float(true_neg):.6f}",
+            ]
+            for col, value in enumerate(display_values):
+                item = QtWidgets.QTableWidgetItem(value)
+                if col >= 3:
+                    item.setTextAlignment(
+                        QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+                    )
+                self.recommendation_table.setItem(row_index, col, item)
         self.predict_button.setEnabled(True)
 
     @QtCore.pyqtSlot(str)
@@ -663,6 +875,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--encoder-checkpoint", default=None)
     parser.add_argument("--tag-head", default=None)
     parser.add_argument("--pxi-head", default=None)
+    parser.add_argument("--recommendation-head", default=str(DEFAULT_VICREG_RECOMMENDATION_PROBE))
+    parser.add_argument("--recommendation-cache", default=str(DEFAULT_VICREG_RECOMMENDATION_CACHE))
+    parser.add_argument("--recommendation-top-k", type=int, default=3,
+                        help="How many similar games to compare in the recommendation-rate tab.")
     parser.add_argument("--games-json", default=None,
                         help="Optional candidate metadata. JSON inputs are filtered to appids present in --h5.")
     parser.add_argument("--tags-dir", default=str(DEFAULT_TAGS_DIR))
