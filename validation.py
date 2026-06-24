@@ -394,7 +394,10 @@ class PredictorWorker(QtCore.QObject):
         if not probe:
             return []
         pooled = pool_features(feats[None, ...], probe.get("pool", "stats"))[0].astype(np.float32)
-        x = (pooled - probe["scaler_mean"]) / probe["scaler_scale"]
+        if probe.get("normalizer", "standard") == "l2":
+            x = pooled / (np.linalg.norm(pooled) + float(probe.get("norm_eps", 1e-8)))
+        else:
+            x = (pooled - probe["scaler_mean"]) / probe["scaler_scale"]
         comps = probe.get("pca_components")
         if comps is not None:
             x = (x - probe["pca_mean"]) @ np.asarray(comps).T
