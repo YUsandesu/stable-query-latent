@@ -496,7 +496,9 @@ def parse_args():
     parser.add_argument("--vicreg-invariance-weight", type=float, default=25.0)
     parser.add_argument("--vicreg-variance-weight", type=float, default=25.0)
     parser.add_argument("--vicreg-covariance-weight", type=float, default=1.0)
-    parser.add_argument("--adversary-weight", type=float, default=1.0)
+    parser.add_argument("--adversary-weight", type=float, default=10.0,
+                        help="Sweep (TAG_PROBE_RESULTS.md) found 10 maximizes content/sentiment "
+                             "selectivity (gap +0.439); weight 1 is too weak, >=20 over-regularizes.")
     parser.add_argument("--grl-lambda", type=float, default=1.0,
                         help="Target GRL strength (reached after warmup + ramp).")
     parser.add_argument("--grl-warmup-epochs", type=float, default=5.0,

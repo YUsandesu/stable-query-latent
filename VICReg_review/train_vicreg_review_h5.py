@@ -727,12 +727,48 @@ def write_manifest(path, status, args, epoch, step, metrics=None, error=None):
     atomic_text_write(json.dumps(payload, ensure_ascii=False, indent=2), path)
 
 
+def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
+    """Tag + PXI dual-probe validation on the current encoder (frozen for the call).
+
+    Lazy-imported so there is no import cycle with dual_probe -> train_tag_probe ->
+    this module. Failures are caught: a probe must never kill a training run.
+    """
+    try:
+        from VICReg_review import dual_probe
+    except Exception:  # fall back to a path import when not run as a package
+        import dual_probe  # type: ignore
+    try:
+        metrics = dual_probe.probe_encoder(
+            model, args.input_h5, device,
+            amp=args.amp and device.type == "cuda",
+            feature_views=args.probe_feature_views,
+            sample_fraction=args.sample_fraction,
+            folds=args.probe_folds,
+            seed=args.seed,
+        )
+    except BaseException as exc:  # noqa: BLE001
+        print(f"[probe] epoch={epoch} skipped: {type(exc).__name__}: {exc}", flush=True)
+        return
+    row = {"epoch": epoch, "global_step": global_step, **metrics}
+    probe_rows.append(row)
+    write_history(probe_rows, args.probe_history_tsv)
+    print(
+        f"[probe] epoch={epoch} tag_content_f1={metrics['tag_content_f1']:.3f} "
+        f"tag_subj_f1={metrics['tag_subjective_f1']:.3f} selectivity={metrics['tag_selectivity']:+.3f} "
+        f"code_sent_r2={metrics['code_sentiment_r2']:.3f} "
+        f"pxi_func_f1={metrics['pxi_func_f1']:.3f} pxi_psych_f1={metrics['pxi_psych_f1']:.3f} "
+        f"pxi_delta={metrics['pxi_delta']:+.3f} (n_pxi={int(metrics['n_pxi'])})",
+        flush=True,
+    )
+
+
 def train(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     cache_dtype = np.dtype(args.cache_dtype)
     resume_checkpoint = None
+    probe_rows = []
 
     with h5py.File(args.input_h5, "r") as h5:
         num_games = int(h5["game_names"].shape[0])
@@ -896,6 +932,9 @@ def train(args):
             write_history(history_rows, args.history_tsv)
             write_manifest(args.manifest_json, "running", args, epoch, global_step, averaged)
 
+            if args.probe_every > 0 and (epoch % args.probe_every == 0 or epoch == args.epochs):
+                run_dual_probe(model, args, device, epoch, global_step, probe_rows)
+
         write_manifest(args.manifest_json, "done", args, args.epochs, global_step, last_metrics)
     except KeyboardInterrupt:
         write_manifest(args.manifest_json, "interrupted", args, epoch if "epoch" in locals() else 0, global_step, last_metrics)
@@ -924,6 +963,13 @@ def parse_args():
     parser.add_argument("--best-checkpoint-out", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_best.pt"))
     parser.add_argument("--history-tsv", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_history.tsv"))
     parser.add_argument("--manifest-json", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_manifest.json"))
+    parser.add_argument("--probe-every", type=int, default=1,
+                        help="Run the tag+PXI dual probe every N epochs (and on the last epoch) to "
+                             "measure probe accuracy during training. 0 = off (e.g. for smoke tests).")
+    parser.add_argument("--probe-feature-views", type=int, default=2,
+                        help="Views per game when extracting probe features (fewer = faster probe).")
+    parser.add_argument("--probe-folds", type=int, default=5)
+    parser.add_argument("--probe-history-tsv", default=str(DEFAULT_HEADS_DIR / "dual_probe_history.tsv"))
     parser.add_argument("--smoke-result-json", default=str(DEFAULT_SMOKE_RESULT))
     parser.add_argument("--resume-checkpoint", default=None,
                         help="Resume model, adversary, optimizer, epoch, and global step from this checkpoint.")
@@ -984,7 +1030,9 @@ def parse_args():
     parser.add_argument("--vicreg-invariance-weight", type=float, default=25.0)
     parser.add_argument("--vicreg-variance-weight", type=float, default=25.0)
     parser.add_argument("--vicreg-covariance-weight", type=float, default=1.0)
-    parser.add_argument("--adversary-weight", type=float, default=1.0)
+    parser.add_argument("--adversary-weight", type=float, default=10.0,
+                        help="Sweep (TAG_PROBE_RESULTS.md) found 10 maximizes content/sentiment "
+                             "selectivity (gap +0.439); weight 1 is too weak, >=20 over-regularizes.")
     parser.add_argument("--grl-lambda", type=float, default=1.0,
                         help="Target GRL strength (reached after warmup + ramp).")
     parser.add_argument("--grl-warmup-epochs", type=float, default=5.0,

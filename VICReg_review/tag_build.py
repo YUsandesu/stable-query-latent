@@ -11,9 +11,15 @@ This script:
   3. Counts tags, keeps those frequent enough, and assigns each a stable id.
   4. Writes a label matrix aligned to game_names.
 
-Outputs (under VICReg_review/tags/ by default):
-  tag_vocab.json   ordered tag list + metadata
-  tag_labels.npz   game_names, appids, labels, raw_counts, normalized_counts
+Outputs (under VICReg_review/tags/ by default). For --source tags this single
+script now builds the whole data-prep chain (previously tag_groups.py +
+build_test_games.py):
+  tag_vocab.json          ordered tag list + metadata
+  tag_labels.npz          game_names, appids, labels, raw_counts, normalized_counts
+  tag_groups.json         mechanics / story / subjective / content / drop partition
+  test_games.json         games.json INTERSECT training set, emotional tags dropped
+  non_emotional_tags.json the kept (non-subjective) tag vocab
+Use --no-groups / --no-test-games to skip the last three.
 
 Tags in games.json are a {tag_name: vote_count} dict. Two target modes:
   binary  label = 1.0 if the game has the tag, else 0.0  (default, cleanest probe)
@@ -73,6 +79,105 @@ def game_tag_dict(record, source):
     # genres / categories are plain lists with no weights.
     values = record.get(source) or []
     return {str(name): 1.0 for name in values}
+
+
+# ---------------------------------------------------------------------------
+# Curated tag partition by role w.r.t. the "keep mechanics+story, drop subjective"
+# hypothesis. Edit these lists to change the partition; everything downstream
+# (tag_groups.json, test_games.json, the selectivity probe) follows. CONTENT =
+# mechanics + story. Anything not listed becomes "drop" (technical / meta / mode).
+# ---------------------------------------------------------------------------
+MECHANICS = [
+    "Action", "Adventure", "RPG", "Open World", "Simulation", "Strategy", "Shooter",
+    "FPS", "Action RPG", "Sandbox", "Survival", "Stealth", "Tactical", "Platformer",
+    "Racing", "Driving", "Fighting", "Puzzle", "Card Game", "Deckbuilding",
+    "Card Battler", "Tower Defense", "RTS", "Turn-Based", "Turn-Based Strategy",
+    "Turn-Based Combat", "Turn-Based Tactics", "Real Time Tactics", "Hack and Slash",
+    "Souls-like", "Rogue-lite", "Rogue-like", "Action Roguelike", "Metroidvania",
+    "Dungeon Crawler", "MMORPG", "JRPG", "CRPG", "Tactical RPG", "Strategy RPG",
+    "Party-Based RPG", "City Builder", "Colony Sim", "Base-Building", "Building",
+    "Crafting", "Management", "Resource Management", "Farming Sim", "Life Sim",
+    "Automobile Sim", "Space Sim", "Grand Strategy", "4X", "Battle Royale",
+    "Bullet Hell", "Beat 'em up", "Visual Novel", "Interactive Fiction",
+    "Walking Simulator", "Point & Click", "Looter Shooter", "Third-Person Shooter",
+    "Vehicular Combat", "Rhythm", "Sports", "Hunting", "Fishing", "Mining",
+    "Parkour", "Swordplay", "Gun Customization", "Character Customization",
+    "Inventory Management", "Loot", "Open World Survival Craft",
+    "Procedural Generation", "Wargame", "Tanks", "Action-Adventure", "Immersive Sim",
+    "3D Platformer", "2D Platformer", "3D Fighter", "Spectacle fighter",
+    "Character Action Game", "Automation", "Agriculture", "Exploration", "Combat",
+]
+STORY = [
+    "Story Rich", "Narrative", "Choices Matter", "Multiple Endings",
+    "Choose Your Own Adventure", "Lore-Rich", "Sci-fi", "Fantasy", "Dark Fantasy",
+    "Horror", "Survival Horror", "Psychological Horror", "Medieval", "Space",
+    "Post-apocalyptic", "Cyberpunk", "Historical", "Military", "War",
+    "World War II", "Mythology", "Zombies", "Aliens", "Robots", "Demons",
+    "Dragons", "Vampire", "Supernatural", "Magic", "Crime", "Detective",
+    "Mystery", "Romance", "Dating Sim", "Dystopian", "Alternate History",
+    "Gothic", "Political", "Assassin", "Martial Arts", "Futuristic",
+    "Conversation", "Text-Based", "Narration",
+]
+SUBJECTIVE = [
+    "Atmospheric", "Great Soundtrack", "Funny", "Relaxing", "Difficult",
+    "Beautiful", "Emotional", "Cute", "Colorful", "Cinematic", "Dark",
+    "Dark Humor", "Comedy", "Drama", "Psychological", "Surreal", "Psychedelic",
+    "Replay Value", "Memes", "Thriller", "Classic", "Old School", "Retro",
+    "Stylized", "Cartoony", "Hand-drawn", "Fast-Paced", "Realistic",
+    "Soundtrack", "Music",
+]
+
+
+def build_tag_groups(vocab_tags):
+    """Partition the kept vocab into mechanics / story / subjective / drop.
+
+    content = mechanics + story. Returns a dict of name -> ordered tag list,
+    restricted to tags actually in the vocab.
+    """
+    valid = set(vocab_tags)
+
+    def clean(names):
+        seen, out = set(), []
+        for name in names:
+            if name in valid and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+
+    mechanics, story, subjective = clean(MECHANICS), clean(STORY), clean(SUBJECTIVE)
+    assigned = set(mechanics) | set(story) | set(subjective)
+    drop = [tag for tag in vocab_tags if tag not in assigned]
+    return {
+        "mechanics": mechanics,
+        "story": story,
+        "subjective": subjective,
+        "content": mechanics + story,
+        "drop": drop,
+    }
+
+
+def build_test_games(game_names, appids, games, vocab_tags, subjective_set):
+    """In-domain game pool: games.json INTERSECT the training set, with emotional
+    (subjective) tags dropped and tags restricted to the vocab.
+
+    Returns (test_games dict {appid: record}, kept non-emotional tag list).
+    """
+    keep_tags = [tag for tag in vocab_tags if tag not in subjective_set]
+    keep_set = set(keep_tags)
+    seen = set()
+    test_games = {}
+    for appid in appids:
+        if appid in seen or appid not in games:
+            continue
+        seen.add(appid)
+        record = dict(games[appid])  # shallow copy; don't mutate loaded games.json
+        raw_tags = record.get("tags") or {}
+        if isinstance(raw_tags, dict):
+            record["tags"] = {t: c for t, c in raw_tags.items() if t in keep_set}
+        else:
+            record["tags"] = {t: 1 for t in raw_tags if t in keep_set}
+        test_games[appid] = record
+    return test_games, keep_tags
 
 
 def build(args):
@@ -180,6 +285,42 @@ def build(args):
     print(f"wrote {out_dir / 'tag_vocab.json'}")
     print(f"wrote {out_dir / 'tag_labels.npz'}")
 
+    # The role partition and the in-domain test pool only make sense for the Steam
+    # `tags` source (mechanics/story/subjective are tag names). Skip for genres/categories.
+    if args.source != "tags":
+        if not args.no_groups or not args.no_test_games:
+            print(f"skip groups/test_games: only built for --source tags (got {args.source})")
+        return
+
+    groups = build_tag_groups(kept)
+    if not args.no_groups:
+        atomic_write_bytes(
+            lambda tmp: tmp.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8"),
+            out_dir / "tag_groups.json",
+        )
+        print(f"tag_groups: mechanics={len(groups['mechanics'])} story={len(groups['story'])} "
+              f"subjective={len(groups['subjective'])} content={len(groups['content'])} drop={len(groups['drop'])}")
+        print(f"wrote {out_dir / 'tag_groups.json'}")
+
+    if not args.no_test_games:
+        subjective_set = set(groups["subjective"])
+        test_games, keep_tags = build_test_games(game_names, appids, games, kept, subjective_set)
+        atomic_write_bytes(
+            lambda tmp: tmp.write_text(json.dumps(test_games, ensure_ascii=False, indent=2), encoding="utf-8"),
+            out_dir / "test_games.json",
+        )
+        atomic_write_bytes(
+            lambda tmp: tmp.write_text(
+                json.dumps({"tags": keep_tags, "dropped_emotional": sorted(subjective_set)},
+                           ensure_ascii=False, indent=2),
+                encoding="utf-8"),
+            out_dir / "non_emotional_tags.json",
+        )
+        print(f"test_games: in-domain games={len(test_games)} (intersection with games.json) "
+              f"non_emotional_tags={len(keep_tags)} dropped_emotional={len(subjective_set)}")
+        print(f"wrote {out_dir / 'test_games.json'}")
+        print(f"wrote {out_dir / 'non_emotional_tags.json'}")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -200,6 +341,10 @@ def parse_args():
         help="If > 0, keep only the K most frequent tags instead of using --min-count.",
     )
     parser.add_argument("--target-mode", choices=["binary", "weight"], default="binary")
+    parser.add_argument("--no-groups", action="store_true",
+                        help="Skip writing tag_groups.json (mechanics/story/subjective/drop).")
+    parser.add_argument("--no-test-games", action="store_true",
+                        help="Skip writing test_games.json (in-domain pool) and non_emotional_tags.json.")
     return parser.parse_args()
 
 

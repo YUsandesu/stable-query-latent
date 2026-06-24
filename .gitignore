@@ -33,3 +33,4 @@ pseudo_text_data_multi.csv
 CLAUDE.md
 AGENTS.md
 tokenAPI.txt
+*.npz

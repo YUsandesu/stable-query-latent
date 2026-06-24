@@ -1,0 +1,20 @@
+故事主线
+《Cyberpunk 2077》发生在夜之城，玩家扮演雇佣兵 V。开局可选三种出身：流浪者、街头小子、公司员工。三条线最终都会把 V 带到夜之城，与 Jackie Welles、T-Bug 组成小队，接下 fixer Dexter DeShawn 的大活：潜入绀碧大厦，偷荒坂公司的“不朽芯片”Relic。官方也把核心故事概括为：V 要偷一个“通向永生”的独一无二植入物，并在夜之城成名。来源：Cyberpunk.net 官方页、Wikipedia 剧情。
+任务崩盘：V 和 Jackie 目睹荒坂赖宣杀死父亲荒坂三郎，并伪装成中毒。逃跑时 T-Bug 被杀，Jackie 重伤死亡，Relic 容器损坏，V 只好把芯片插进自己脑袋。Dex 为了自保把 V 枪杀丢进垃圾场，但 Relic 的纳米技术把 V 救活，同时把 Johnny Silverhand 的人格/意识开始写入 V 的大脑。
+V 醒来后，脑中出现 Johnny Silverhand，一个 2023 年袭击荒坂塔的摇滚歌手兼反公司恐怖分子。义体医生 Viktor 告诉 V：Relic 正在用 Johnny 的人格覆盖 V，V 只剩几周时间。于是主线变成“找办法把 Johnny 和 V 分开”。
+中段主线分几条调查线并行：
+•Takemura / 荒坂线：荒坂三郎的保镖 Takemura 怀疑赖宣弑父，想利用 V 作为证人。他和 V 试图接触荒坂华子，揭穿赖宣。
+•Evelyn / Judy / 巫毒帮线：V 追查委托人 Evelyn Parker，发现她被黑客攻击、被清道夫虐待。Judy 帮 V 从 Evelyn 的超梦记忆里发现，巫毒帮想要 Relic，是为了联系黑墙之外的 AI Alt Cunningham。
+•Panam / Hellman 线：V 与流浪者 Panam Palmer 合作，抓到 Relic 相关科学家 Anders Hellman，但 Hellman 也无法真正救 V。
+•Johnny / Alt / Mikoshi 线：V 通过 Johnny 的记忆得知，Alt Cunningham 曾创造 Soulkiller，能把人的意识数字化，但会杀死肉体。荒坂用 Mikoshi 存放人格备份。Alt 已变成黑墙外 AI，她答应：如果 V 帮她接入荒坂子网和 Mikoshi，她可以把 V 与 Johnny 分离。
+最终，V 赴“余烬”见荒坂华子。这里是本体结局分岔点。无论怎么选，V 最终都会面对 Adam Smasher，并发现 Relic 对身体造成的损伤已经不可逆：V 的身体更适合 Johnny，V 自己即使活下来也通常只剩有限时间。来源：Wikipedia 剧情结尾、Cyberpunk Wiki 结局页。
+本体主要结局
+•恶魔 The Devil：V 接受华子帮助，协助荒坂推翻赖宣。三郎的 engram 最终占据赖宣身体。荒坂移除 Johnny，但 V 仍无法被治愈。V 可选择返回地球度过余生，或把自己也做成 engram 等待未来。
+•星星 The Star：完成 Panam 支线后，V 可与 Aldecaldos 流浪者家族进攻荒坂。结局中 V 保留身体、离开夜之城，和 Panam/流浪者寻找新的治疗机会。
+•太阳 The Sun：完成 Rogue/Johnny 支线后，Johnny 控制 V 的身体与 Rogue 攻入荒坂。Rogue 可能牺牲。V 回到身体后成为来生酒吧传奇，准备执行太空相关的大活，但生命仍有限。
+•节制 Temperance：在 Mikoshi 中，V 选择让 Johnny 留在身体里，自己跟随 Alt 进入黑墙外。Johnny 离开夜之城，开始新的生活。
+•自杀/最低阻力 Path of Least Resistance：V 在天台选择不牵连任何人，结束自己的生命。
+•隐藏结局 Don’t Fear the Reaper：满足 Johnny 好感/对话条件后，V 和 Johnny 可不带队友单独强攻荒坂塔。成功后可进入类似“太阳”或“节制”的收束。
+《往日之影》DLC 故事
+DLC 在太平洲后开启。Songbird 联系 V，说能治好 Relic，但 V 必须去 Dogtown 救新美国总统 Rosalind Myers。总统飞机被 Dogtown 军阀 Kurt Hansen 击落，V 救出 Myers，又与 FIA 特工 Solomon Reed 合作寻找 Songbird。来源：Phantom Liberty 剧情。
+真相逐渐变脏：Songbird 一直被 Myers 命令接触黑墙，精神被黑墙外力量侵蚀；她策划坠机是为了逃离 NUSA 和 Hansen。Hansen 手里有 Neural Matrix，据说能治疗 Songbird 和 V，但后来 Songbird 承认它只能用一次。DLC 最终分歧：帮 Songbird：V 帮她逃往月球。最后她承认只能救自己。V 可杀 Reed，让 Songbird 登月；也可把她交给 Reed。帮 Reed：V 背叛 Songbird，她失控逃入 Cynosure 设施。V 了解她被 FIA/ Myers 利用的过去后，可按她请求让她死，或把她交还 NUSA。如果 Songbird 被交给 Reed/NUSA，会解锁本体新增结局高塔 The Tower：NUSA 治好 V，移除 Relic，也彻底删除 Johnny。V 昏迷两年，醒来后不能再使用战斗义体，朋友大多离散，只能作为普通人重新生活。这个结局很“活下来了，但传奇死了”。游戏机制核心类型是第一人称开放世界动作 RPG。V 可自定义外观、声音、出身、服装、属性和义体。五大本体属性是 Body、Intelligence、Reflexes、Technical Ability、Cool；DLC 增加 Relic 能力树。官方页面也强调：用技能、专长、可升级武器、黑客能力和身体增强植入物来塑造打法。来源：官方 Gameplay 描述。战斗自由度很高，主要玩法包括：枪战流：突击步枪、手枪、霰弹枪、狙击等。近战流：武士刀、刀具、钝器、螳螂刀、大猩猩手臂等。黑客流 Netrunner：用 quickhack 瘫痪敌人、引爆设备、传播病毒、控制摄像头/炮塔。潜行流：消音武器、潜入、非致命击倒、绕路、破解门禁。混合流：例如黑客开局削弱敌人，再用刀/枪清场。载具战斗：2.0 后可开车时用手枪/冲锋枪/载具武器作战，部分车辆有机枪或导弹。来源：Update 2.0 官方说明。装备系统包括武器、服装、义体、消耗品、手雷、快速破解程序、载具等。武器大致分为 Power、Tech、Smart：Power 可跳弹，Tech 可蓄力穿透，Smart 可追踪但依赖对应义体。伤害类型有物理、热能、电击、毒素等。装备/制作规格按 Tier 1 到 Tier 5++ 分级。制作和升级在菜单里做，需要制作规格和组件；组件可拾取、购买或拆解装备获得；标志性武器可升级，义体可在义体医生处升级。来源：CDPR 制作/升级支持页。升级体系主要有：等级 XP：做任务、战斗、探索获得，用于属性/专长成长。街头声望 Street Cred：支线、委托提升，解锁更多商人、装备、任务。属性点：决定身体、反应、技术、智力、镇定等方向。Perk 点：强化具体玩法，例如近战、黑客、枪械、移动、工程。义体容量：限制能装多少义体；2.0 后义体是角色构筑的核心。Relic 点：DLC 专属，用来强化特殊义体能力。购买与经济系统：货币是欧元美元 eddies。玩家可从武器店、服装店、义体医生、黑市、食物/药品商、载具网站等购买装备；也能从尸体、箱子、任务奖励、NCPD 事件、空投和探索中拿物品。V 有公寓、车库，可购买车辆和额外公寓。开放世界里有主线、支线、委托 gig、NCPD 扫描、赛博精神病任务、赛车、拳赛、射击挑战、超梦调查等活动。自由度方面，夜之城和恶土可自由探索；多数任务支持正面冲突、潜行、黑客、绕路、对话检定等不同解法。出身不会改变数值强弱，但会给专属对话。支线选择会影响同伴关系、恋爱、结局路线和结局电话。官方也强调夜之城“去哪里、何时去、怎么去”由玩家决定。来源：官方 Night City / Story 描述、Wikipedia Gameplay。

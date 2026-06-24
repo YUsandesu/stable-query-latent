@@ -1,18 +1,34 @@
-"""Validation probe: can a frozen VICReg encoder's code predict a game's tags?
+"""Fair tag probe: cross-validated diagnostic on a frozen VICReg encoder.
 
-This is a diagnostic, NOT part of VICReg training. The encoder is loaded frozen;
-gradients never flow into it. We:
+This is a redesign of the original single-split probe. It answers "can a frozen
+VICReg code predict a game's Steam tags?" honestly, given that the dataset is
+tiny (293 games) and the tag set is long-tailed (many tags appear in only a
+handful of games, some are effectively unique to one game).
 
-  1. Load a VICReg checkpoint and freeze the encoder.
-  2. For each game, sample a few review views, encode them, and average the
-     (num_latents, output_dim) codes into one cached per-game feature.
-  3. Train a TagRegressionHead (its own optimizer) on those frozen features to
-     predict the multi-hot tag labels from tag_build.py.
-  4. Stop on its own when learning plateaus (val-loss patience, and optionally a
-     gradient-norm floor).
+What changed vs. the old probe and *why*:
 
-A rising tag mAP across VICReg checkpoints means the encoder is learning a more
-robust game representation. Run tag_build.py first.
+  * K-fold cross-validation instead of one 80/20 split. With ~290 games a single
+    val split of ~57 games is high variance; one lucky/unlucky split moved
+    micro-F1 by several points. We report mean +/- std over K folds so the
+    number is trustworthy.
+
+  * A fairness rule. A tag is scored on a fold only if it has >= --min-train-pos
+    positive games in that fold's TRAIN split and >= 1 in val. A tag that is
+    unique to one game (or appears only in the val split) is unpredictable by
+    construction; including it just adds guaranteed-zero cells that drag micro-F1
+    down and tell us nothing about the encoder. We exclude those cells from the
+    metric and report how many tags survive.
+
+  * A per-tag linear classifier (logistic regression) trained per fold, with the
+    decision threshold tuned on TRAIN only (no val leakage). The encoder is
+    frozen; this just reads its code.
+
+  * A frequency-floor breakdown: micro-F1 restricted to tags seen in >= F games.
+    This quantifies the "labels are too discrete" problem directly.
+
+Run tag_build.py first. Compare the reported micro-F1 against ceiling_diagnostic.py
+(the same pipeline on the raw 1024-d Qwen embeddings), which is the upper bound
+any frozen-encoder probe can reach.
 """
 
 import argparse
@@ -24,14 +40,13 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
-from torch import nn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from VICReg_review.model import LatentArrayMLP, TagRegressionHead  # noqa: E402
+from VICReg_review.model import LatentArrayMLP  # noqa: E402
 from VICReg_review.train_vicreg_review_h5 import load_game_views  # noqa: E402
 
 DEFAULT_H5 = SCRIPT_DIR / "h5" / "game_review_cleaned_3_sentences.h5"
@@ -50,18 +65,6 @@ def atomic_text_write(text, path):
     tmp_path = path.with_name(path.name + ".tmp")
     try:
         tmp_path.write_text(text, encoding="utf-8")
-        tmp_path.replace(path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
-
-def atomic_torch_save(payload, path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    try:
-        torch.save(payload, tmp_path)
         tmp_path.replace(path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -125,603 +128,265 @@ def extract_features(encoder, h5_path, sample_fraction, feature_views, seed, cac
             feats[game_index] = mean_code.cpu()
             if (game_index + 1) % 50 == 0 or game_index + 1 == num_games:
                 print(f"features {game_index + 1}/{num_games}", flush=True)
-    return feats, game_names
+    return feats.numpy(), game_names
+
+
+def pool_features(feats, pool):
+    """feats: (num_games, num_latents, output_dim) -> (num_games, D)."""
+    if pool == "flatten":
+        return feats.reshape(feats.shape[0], -1)
+    if pool == "mean":
+        return feats.mean(axis=1)
+    if pool == "stats":
+        return np.concatenate([feats.mean(axis=1), feats.std(axis=1)], axis=1)
+    raise ValueError(f"unknown pool: {pool}")
 
 
 def load_labels(tags_dir):
     vocab = json.loads((Path(tags_dir) / "tag_vocab.json").read_text(encoding="utf-8"))
-    npz = np.load(Path(tags_dir) / "tag_labels.npz", allow_pickle=False)
-    labels = npz["labels"].astype(np.float32)
-    raw_counts = npz["raw_counts"].astype(np.float32) if "raw_counts" in npz else labels.copy()
-    normalized_counts = (
-        npz["normalized_counts"].astype(np.float32)
-        if "normalized_counts" in npz
-        else labels.copy()
-    )
-    return (
-        vocab,
-        [str(name) for name in npz["game_names"]],
-        labels,
-        raw_counts,
-        normalized_counts,
-    )
+    npz = np.load(Path(tags_dir) / "tag_labels.npz", allow_pickle=True)
+    names = [str(n) for n in npz["game_names"]]
+    labels = (npz["labels"] > 0).astype(np.int8)
+    return vocab["tags"], names, labels
 
 
-def align_matrix(feature_names, label_names, values):
-    index = {name: row for row, name in enumerate(label_names)}
-    aligned = np.zeros((len(feature_names), values.shape[1]), dtype=np.float32)
+def align(feature_names, label_names, labels):
+    index = {n: i for i, n in enumerate(label_names)}
+    out = np.zeros((len(feature_names), labels.shape[1]), dtype=np.int8)
+    keep = np.zeros(len(feature_names), dtype=bool)
     for row, name in enumerate(feature_names):
         if name in index:
-            aligned[row] = values[index[name]]
-    return aligned
+            out[row] = labels[index[name]]
+            keep[row] = True
+    return out, keep
 
 
-def split_indices(keep, test_ratio, seed):
+def kfold_indices(n, k, seed):
     rng = np.random.default_rng(seed)
-    shuffled = rng.permutation(keep)
-    test_count = max(1, int(round(len(keep) * test_ratio)))
-    return shuffled[test_count:], shuffled[:test_count]
+    perm = rng.permutation(n)
+    folds = np.array_split(perm, k)
+    for i in range(k):
+        val = folds[i]
+        train = np.concatenate([folds[j] for j in range(k) if j != i])
+        yield train, val
 
 
-def split_indices_multilabel(keep, labels, test_ratio, seed):
-    """Greedy multilabel split with roughly balanced tag coverage.
+def micro_prf(tp, fp, fn):
+    p = tp / (tp + fp) if tp + fp else 0.0
+    r = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * p * r / (p + r) if p + r else 0.0
+    return f1, p, r
 
-    The tag probe dataset is small and very multi-label. A plain random split can
-    put rare tags only on one side, making both training and validation noisy.
-    This split tries to match each tag's desired validation positives while
-    keeping the requested validation size.
-    """
-    rng = np.random.default_rng(seed)
-    keep = np.asarray(keep, dtype=np.int64)
-    label_view = labels[keep] > 0
-    test_count = max(1, int(round(len(keep) * test_ratio)))
-    tag_totals = label_view.sum(axis=0).astype(np.int64)
-    target = np.zeros_like(tag_totals)
-    learnable = tag_totals >= 2
-    target[learnable] = np.maximum(1, np.round(tag_totals[learnable] * test_ratio).astype(np.int64))
-    target[learnable] = np.minimum(target[learnable], tag_totals[learnable] - 1)
 
-    order = rng.permutation(len(keep))
-    selected = np.zeros(len(keep), dtype=bool)
-    val_counts = np.zeros(labels.shape[1], dtype=np.int64)
+def cross_validate(X, y, tags, args):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
 
-    while selected.sum() < test_count:
-        deficit = np.maximum(target - val_counts, 0)
-        if deficit.sum() == 0:
-            break
-        best_local = None
-        best_score = None
-        for local_index in order:
-            if selected[local_index]:
+    n, num_tags = y.shape
+    per_tag_tp = np.zeros(num_tags)
+    per_tag_fp = np.zeros(num_tags)
+    per_tag_fn = np.zeros(num_tags)
+    scored_tags = np.zeros(num_tags, dtype=bool)
+    fold_f1s = []
+
+    for fold, (tr, va) in enumerate(kfold_indices(n, args.folds, args.seed)):
+        scaler = StandardScaler().fit(X[tr])
+        Xtr, Xva = scaler.transform(X[tr]), scaler.transform(X[va])
+        f_tp = f_fp = f_fn = 0.0
+        learnable = 0
+        for t in range(num_tags):
+            if int(y[tr, t].sum()) < args.min_train_pos or int(y[va, t].sum()) < 1:
                 continue
-            row = label_view[local_index]
-            score = int((row * deficit).sum())
-            if best_score is None or score > best_score:
-                best_score = score
-                best_local = int(local_index)
-        if best_local is None or best_score <= 0:
-            break
-        selected[best_local] = True
-        val_counts += label_view[best_local].astype(np.int64)
+            learnable += 1
+            scored_tags[t] = True
+            clf = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced")
+            clf.fit(Xtr, y[tr, t])
+            tr_prob = clf.predict_proba(Xtr)[:, 1]
+            va_prob = clf.predict_proba(Xva)[:, 1]
+            best_thr, best = 0.5, -1.0
+            for thr in np.linspace(0.1, 0.9, 33):
+                f1, _, _ = micro_prf(
+                    float(((tr_prob >= thr) & (y[tr, t] > 0)).sum()),
+                    float(((tr_prob >= thr) & (y[tr, t] == 0)).sum()),
+                    float(((tr_prob < thr) & (y[tr, t] > 0)).sum()),
+                )
+                if f1 > best:
+                    best, best_thr = f1, thr
+            pred = va_prob >= best_thr
+            tru = y[va, t] > 0
+            tp = float((pred & tru).sum()); fp = float((pred & ~tru).sum()); fn = float((~pred & tru).sum())
+            per_tag_tp[t] += tp; per_tag_fp[t] += fp; per_tag_fn[t] += fn
+            f_tp += tp; f_fp += fp; f_fn += fn
+        f1, p, r = micro_prf(f_tp, f_fp, f_fn)
+        fold_f1s.append(f1)
+        print(f"fold {fold}: learnable_tags={learnable} micro_f1={f1:.4f} P={p:.3f} R={r:.3f}", flush=True)
 
-    if selected.sum() < test_count:
-        remaining = order[~selected[order]]
-        selected[remaining[: test_count - int(selected.sum())]] = True
-    elif selected.sum() > test_count:
-        selected[np.flatnonzero(selected)[test_count:]] = False
-
-    val_idx = keep[selected]
-    train_idx = keep[~selected]
-    return train_idx, val_idx
-
-
-def average_precision(scores, labels):
-    if labels.sum() == 0:
-        return np.nan
-    order = np.argsort(-scores)
-    ordered = labels[order]
-    cum_tp = np.cumsum(ordered)
-    precision = cum_tp / (np.arange(len(ordered)) + 1)
-    return float((precision * ordered).sum() / ordered.sum())
+    return per_tag_tp, per_tag_fp, per_tag_fn, scored_tags, fold_f1s
 
 
-def micro_f1_at_threshold(probs, labels, threshold):
-    preds = (probs >= threshold).astype(np.float32)
-    tp = float((preds * labels).sum())
-    fp = float((preds * (1 - labels)).sum())
-    fn = float(((1 - preds) * labels).sum())
-    precision = tp / (tp + fp) if tp + fp > 0 else 0.0
-    recall = tp / (tp + fn) if tp + fn > 0 else 0.0
-    micro_f1 = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
-    predicted_tags_per_game = float(preds.sum(axis=1).mean()) if preds.size else 0.0
-    return precision, recall, micro_f1, predicted_tags_per_game
+def summarize(per_tag_tp, per_tag_fp, per_tag_fn, scored_tags, fold_f1s, y, tags, args):
+    F1, P, R = micro_prf(per_tag_tp[scored_tags].sum(), per_tag_fp[scored_tags].sum(), per_tag_fn[scored_tags].sum())
+    per_tag_f1 = np.zeros(len(tags))
+    for t in np.flatnonzero(scored_tags):
+        per_tag_f1[t], _, _ = micro_prf(per_tag_tp[t], per_tag_fp[t], per_tag_fn[t])
+    macro = float(per_tag_f1[scored_tags].mean()) if scored_tags.any() else 0.0
 
+    doc_freq = y.sum(axis=0)
+    floor_rows = []
+    for floor in args.freq_floors:
+        sel = scored_tags & (doc_freq >= floor)
+        if not sel.any():
+            continue
+        f1, p, r = micro_prf(per_tag_tp[sel].sum(), per_tag_fp[sel].sum(), per_tag_fn[sel].sum())
+        floor_rows.append({"floor": int(floor), "tags": int(sel.sum()), "micro_f1": f1, "precision": p, "recall": r})
 
-def best_global_threshold(probs, labels):
-    best = (0.5, -1.0)
-    for threshold in np.linspace(0.01, 0.99, 99):
-        _, _, micro_f1, _ = micro_f1_at_threshold(probs, labels, float(threshold))
-        if micro_f1 > best[1]:
-            best = (float(threshold), micro_f1)
-    return best[0]
-
-
-def evaluate_presence(logits, labels, threshold=None):
-    probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
-    if threshold is None:
-        threshold = best_global_threshold(probs, labels)
-    precision, recall, micro_f1, predicted_tags_per_game = micro_f1_at_threshold(probs, labels, threshold)
-    aps = [average_precision(probs[:, tag], labels[:, tag]) for tag in range(labels.shape[1])]
-    aps = np.asarray(aps, dtype=np.float64)
-    mean_ap = float(np.nanmean(aps)) if np.any(~np.isnan(aps)) else 0.0
+    ranked = sorted(
+        [(tags[t], float(per_tag_f1[t]), int(doc_freq[t])) for t in np.flatnonzero(scored_tags)],
+        key=lambda x: -x[1],
+    )
     return {
-        "micro_f1": micro_f1,
-        "precision": precision,
-        "recall": recall,
-        "mAP": mean_ap,
-        "threshold": float(threshold),
-        "predicted_tags_per_game": predicted_tags_per_game,
-    }, aps
-
-
-def best_score_threshold(scores, labels):
-    finite = scores[np.isfinite(scores)]
-    if finite.size == 0:
-        return 0.5
-    low = float(finite.min())
-    high = float(finite.max())
-    if low == high:
-        return low
-    best = (low, -1.0)
-    for threshold in np.linspace(low, high, 201):
-        _, _, micro_f1, _ = micro_f1_at_threshold(scores, labels, float(threshold))
-        if micro_f1 > best[1]:
-            best = (float(threshold), micro_f1)
-    return best[0]
-
-
-def evaluate_scores(scores, labels, threshold=None):
-    if threshold is None:
-        threshold = best_score_threshold(scores, labels)
-    precision, recall, micro_f1, predicted_tags_per_game = micro_f1_at_threshold(scores, labels, threshold)
-    aps = [average_precision(scores[:, tag], labels[:, tag]) for tag in range(labels.shape[1])]
-    aps = np.asarray(aps, dtype=np.float64)
-    mean_ap = float(np.nanmean(aps)) if np.any(~np.isnan(aps)) else 0.0
-    return {
-        "micro_f1": micro_f1,
-        "precision": precision,
-        "recall": recall,
-        "mAP": mean_ap,
-        "threshold": float(threshold),
-        "predicted_tags_per_game": predicted_tags_per_game,
-    }, aps
-
-
-def count_regression_loss(count_logits, raw_counts, presence, negative_weight):
-    pred_log_counts = nn.functional.softplus(count_logits)
-    target_log_counts = torch.log1p(raw_counts)
-    positive_mask = presence > 0
-    if positive_mask.any():
-        positive_loss = nn.functional.smooth_l1_loss(
-            pred_log_counts[positive_mask],
-            target_log_counts[positive_mask],
-        )
-    else:
-        positive_loss = pred_log_counts.new_tensor(0.0)
-    if negative_weight > 0:
-        negative_mask = ~positive_mask
-        if negative_mask.any():
-            negative_loss = nn.functional.smooth_l1_loss(
-                pred_log_counts[negative_mask],
-                torch.zeros_like(pred_log_counts[negative_mask]),
-            )
-        else:
-            negative_loss = pred_log_counts.new_tensor(0.0)
-    else:
-        negative_loss = pred_log_counts.new_tensor(0.0)
-    return positive_loss + negative_weight * negative_loss
-
-
-def count_metrics(count_logits, raw_counts, presence):
-    pred_counts = torch.expm1(nn.functional.softplus(torch.from_numpy(count_logits))).numpy()
-    positive_mask = presence > 0
-    if not np.any(positive_mask):
-        return {"count_mae": 0.0, "count_rmse": 0.0}
-    errors = pred_counts[positive_mask] - raw_counts[positive_mask]
-    return {
-        "count_mae": float(np.mean(np.abs(errors))),
-        "count_rmse": float(np.sqrt(np.mean(errors ** 2))),
+        "micro_f1": F1,
+        "precision": P,
+        "recall": R,
+        "macro_f1": macro,
+        "fold_micro_f1_mean": float(np.mean(fold_f1s)),
+        "fold_micro_f1_std": float(np.std(fold_f1s)),
+        "fold_micro_f1": [float(x) for x in fold_f1s],
+        "scored_tags": int(scored_tags.sum()),
+        "total_tags": int(len(tags)),
+        "freq_floor_breakdown": floor_rows,
+        "top_tags": [[t, round(f, 4), n] for t, f, n in ranked[:15]],
+        "bottom_tags": [[t, round(f, 4), n] for t, f, n in ranked[-15:]],
     }
 
 
-def metric_value(row, name):
-    if name in ("micro_f1", "mAP", "precision", "recall"):
-        return float(row[name])
-    if name == "val_loss":
-        return -float(row["val_loss"])
-    raise ValueError(f"Unknown selection metric: {name}")
+def export_linear_probe(X, y, tags, doc_freq, args, encoder_path):
+    """Fit the FINAL deployable probe on ALL labeled games and save a portable
+    linear artifact (scaler + per-tag logistic weights). This is the exact same
+    method used in cross_validate, just trained on everything for inference. The
+    artifact carries no sklearn dependency: inference is sigmoid(x_std @ W.T + b).
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler().fit(X)
+    Xs = scaler.transform(X)
+    num_tags = y.shape[1]
+    coef = np.zeros((num_tags, X.shape[1]), dtype=np.float32)
+    intercept = np.zeros(num_tags, dtype=np.float32)
+    threshold = np.full(num_tags, 0.5, dtype=np.float32)
+    trained = np.zeros(num_tags, dtype=bool)
+    for t in range(num_tags):
+        if int(y[:, t].sum()) < args.min_train_pos:
+            continue  # too rare to fit; leave at zero (prob ~ sigmoid(0)=0.5 floor handled below)
+        clf = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced")
+        clf.fit(Xs, y[:, t])
+        coef[t] = clf.coef_[0]
+        intercept[t] = float(clf.intercept_[0])
+        trained[t] = True
+        prob = clf.predict_proba(Xs)[:, 1]
+        best_thr, best = 0.5, -1.0
+        for thr in np.linspace(0.1, 0.9, 33):
+            f1, _, _ = micro_prf(
+                float(((prob >= thr) & (y[:, t] > 0)).sum()),
+                float(((prob >= thr) & (y[:, t] == 0)).sum()),
+                float(((prob < thr) & (y[:, t] > 0)).sum()),
+            )
+            if f1 > best:
+                best, best_thr = f1, thr
+        threshold[t] = best_thr
+
+    content_mask = np.zeros(num_tags, dtype=bool)
+    groups_path = Path(args.tags_dir) / "tag_groups.json"
+    if groups_path.exists():
+        groups = json.loads(groups_path.read_text(encoding="utf-8"))
+        content_set = set(groups.get("content", []))
+        content_mask = np.array([t in content_set for t in tags], dtype=bool)
+
+    artifact = {
+        "kind": "linear_tag_probe",
+        "encoder_checkpoint": str(Path(encoder_path).resolve()),
+        "tags": list(tags),
+        "pool": args.pool,
+        "feature_views": args.feature_views,
+        "sample_fraction": args.sample_fraction,
+        "C": args.C,
+        "scaler_mean": scaler.mean_.astype(np.float32),
+        "scaler_scale": scaler.scale_.astype(np.float32),
+        "coef": coef,
+        "intercept": intercept,
+        "threshold": threshold,
+        "trained_mask": trained,
+        "content_mask": content_mask,
+        "doc_freq": doc_freq.astype(np.int32),
+    }
+    torch.save(artifact, args.export_head)
+    print(f"exported deployable linear probe ({int(trained.sum())}/{num_tags} tags fit) -> {args.export_head}",
+          flush=True)
 
 
-def make_minibatches(num_items, batch_size, generator, device):
-    if batch_size <= 0 or batch_size >= num_items:
-        yield torch.arange(num_items, device=device)
-        return
-    order = torch.randperm(num_items, generator=generator, device=device)
-    for start in range(0, num_items, batch_size):
-        yield order[start : start + batch_size]
-
-
-def pooled_numpy_features(feats, pool):
-    values = feats.detach().cpu().numpy() if torch.is_tensor(feats) else np.asarray(feats)
-    if pool == "flatten":
-        return values.reshape(values.shape[0], -1).astype(np.float32, copy=False)
-    if pool == "mean":
-        return values.mean(axis=1).astype(np.float32, copy=False)
-    if pool == "stats":
-        return np.concatenate(
-            [
-                values.mean(axis=1),
-                values.std(axis=1),
-                values.max(axis=1),
-                values.min(axis=1),
-            ],
-            axis=1,
-        ).astype(np.float32, copy=False)
-    raise ValueError(f"Unknown pool: {pool}")
-
-
-def fit_ridge_scores(train_x, train_y, val_x, alpha):
-    mean = train_x.mean(axis=0, keepdims=True)
-    std = train_x.std(axis=0, keepdims=True)
-    std = np.where(std < 1e-6, 1.0, std)
-    train_z = (train_x - mean) / std
-    val_z = (val_x - mean) / std
-
-    design = np.concatenate([train_z, np.ones((train_z.shape[0], 1), dtype=np.float32)], axis=1)
-    reg = np.eye(design.shape[1], dtype=np.float32) * float(alpha)
-    reg[-1, -1] = 0.0
-    weights = np.linalg.solve(
-        design.T @ design + reg,
-        design.T @ train_y.astype(np.float32),
-    ).astype(np.float32)
-    val_scores = np.concatenate([val_z, np.ones((val_z.shape[0], 1), dtype=np.float32)], axis=1) @ weights
-
-    raw_weight = weights[:-1].T / std.reshape(1, -1)
-    raw_bias = weights[-1] - (raw_weight * mean.reshape(1, -1)).sum(axis=1)
-    return val_scores.astype(np.float32), raw_weight.astype(np.float32), raw_bias.astype(np.float32)
-
-
-def save_linear_head_from_weights(args, num_tags, tags, feats_shape, weight, bias, report):
-    if args.no_save:
-        return
-    head = TagRegressionHead(
-        num_tags=num_tags,
-        num_latents=feats_shape[1],
-        latent_out_dim=feats_shape[2],
-        hidden_dims=(),
-        dropout=0.0,
-        pool=args.pool,
-    )
-    with torch.no_grad():
-        head.presence.weight.copy_(torch.from_numpy(weight))
-        head.presence.bias.copy_(torch.from_numpy(bias))
-        head.count.weight.zero_()
-        head.count.bias.zero_()
-    atomic_torch_save(
-        {
-            "head_state_dict": head.state_dict(),
-            "num_tags": num_tags,
-            "tags": tags,
-            "pool": args.pool,
-            "hidden_dims": [],
-            "head_type": "ridge_presence",
-            "report": report,
-        },
-        args.head_out,
-    )
-
-
-def train(args):
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+def run(args):
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-
     with h5py.File(args.h5, "r") as h5:
         input_dim = int(h5.attrs["input_dim"])
 
     encoder, cfg, enc_epoch, enc_step = load_frozen_encoder(args.checkpoint, input_dim, device)
     print(f"encoder loaded from {args.checkpoint} (epoch={enc_epoch} step={enc_step}) cfg={cfg}", flush=True)
 
-    feats, feature_names = extract_features(
-        encoder, args.h5, args.sample_fraction, args.feature_views,
-        args.seed, args.cache_dtype, device, args.amp,
-    )
-    vocab, label_names, raw_labels, raw_counts, normalized_counts = load_labels(args.tags_dir)
-    labels = align_matrix(feature_names, label_names, raw_labels)
-    raw_counts = align_matrix(feature_names, label_names, raw_counts)
-    normalized_counts = align_matrix(feature_names, label_names, normalized_counts)
-    presence = (raw_counts > 0).astype(np.float32)
-    num_tags = labels.shape[1]
-    print(f"features={tuple(feats.shape)} tags={num_tags} target_mode={vocab['target_mode']}", flush=True)
-
-    keep = np.flatnonzero((presence > 0).any(axis=1))
-    if args.stratified_split:
-        train_idx, val_idx = split_indices_multilabel(keep, presence, args.test_ratio, args.seed)
+    stem = Path(args.checkpoint).stem
+    cache = Path(args.tags_dir) / f"probe_feat_{stem}_fv{args.feature_views}_sf{args.sample_fraction}.npz"
+    if cache.exists() and not args.rebuild_features:
+        data = np.load(cache, allow_pickle=True)
+        feats, feature_names = data["feats"], [str(n) for n in data["names"]]
+        print(f"loaded cached features {feats.shape} from {cache}", flush=True)
     else:
-        train_idx, val_idx = split_indices(keep, args.test_ratio, args.seed)
-    print(f"games_with_labels={len(keep)} train={len(train_idx)} val={len(val_idx)}", flush=True)
-
-    feats_flat = feats.to(device)
-    presence_t = torch.from_numpy(presence).to(device)
-    raw_counts_t = torch.from_numpy(raw_counts).to(device)
-    train_x = feats_flat[train_idx]
-    train_presence = presence_t[train_idx]
-    train_counts = raw_counts_t[train_idx]
-    val_x = feats_flat[val_idx]
-    val_presence = presence[val_idx]
-    val_counts = raw_counts[val_idx]
-
-    if args.solver == "ridge":
-        train_np = pooled_numpy_features(feats[train_idx], args.pool)
-        val_np = pooled_numpy_features(feats[val_idx], args.pool)
-        val_scores, ridge_weight, ridge_bias = fit_ridge_scores(
-            train_np,
-            presence[train_idx],
-            val_np,
-            args.ridge_alpha,
+        feats, feature_names = extract_features(
+            encoder, args.h5, args.sample_fraction, args.feature_views,
+            args.seed, args.cache_dtype, device, args.amp,
         )
-        final_metrics, per_tag_ap = evaluate_scores(val_scores, val_presence)
-        final_metrics.update({"count_mae": 0.0, "count_rmse": 0.0})
-        tags = vocab["tags"]
-        ranked = sorted(
-            [(tags[i], per_tag_ap[i]) for i in range(num_tags) if not np.isnan(per_tag_ap[i])],
-            key=lambda item: -item[1],
-        )
-        report = {
-            "checkpoint": str(Path(args.checkpoint).resolve()),
-            "encoder_epoch": enc_epoch,
-            "encoder_global_step": enc_step,
-            "encoder_cfg": cfg,
-            "num_tags": num_tags,
-            "target_mode": vocab["target_mode"],
-            "head_type": "ridge_presence",
-            "solver": args.solver,
-            "pool": args.pool,
-            "ridge_alpha": args.ridge_alpha,
-            "selection_metric": "micro_f1",
-            "score_space": "raw_ridge_score",
-            "games_with_labels": int(len(keep)),
-            "train": int(len(train_idx)),
-            "val": int(len(val_idx)),
-            "best_metrics": {"epoch": 0, **final_metrics},
-            "final_val_metrics": final_metrics,
-            "top_tags": ranked[:15],
-            "bottom_tags": ranked[-15:],
-            "stopped_epoch": 0,
-            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        atomic_text_write(json.dumps(report, ensure_ascii=False, indent=2), args.report_json)
-        atomic_text_write(
-            "\t".join(["epoch", "micro_f1", "precision", "recall", "mAP", "threshold", "predicted_tags_per_game"]) + "\n"
-            + "\t".join([
-                "0",
-                f"{final_metrics['micro_f1']:.6g}",
-                f"{final_metrics['precision']:.6g}",
-                f"{final_metrics['recall']:.6g}",
-                f"{final_metrics['mAP']:.6g}",
-                f"{final_metrics['threshold']:.6g}",
-                f"{final_metrics['predicted_tags_per_game']:.6g}",
-            ])
-            + "\n",
-            args.history_tsv,
-        )
-        save_linear_head_from_weights(args, num_tags, tags, feats.shape, ridge_weight, ridge_bias, report)
-        print(
-            f"DONE ridge_alpha={args.ridge_alpha:g} final_mAP={final_metrics['mAP']:.4f} "
-            f"micro_f1={final_metrics['micro_f1']:.4f}",
-            flush=True,
-        )
-        print(f"wrote {args.report_json}")
-        return
+        np.savez(cache, feats=feats, names=np.asarray(feature_names))
+        print(f"cached features {feats.shape} -> {cache}", flush=True)
 
-    head = TagRegressionHead(
-        num_tags=num_tags,
-        num_latents=feats.shape[1],
-        latent_out_dim=feats.shape[2],
-        hidden_dims=tuple(args.hidden_dims),
-        dropout=args.dropout,
-        pool=args.pool,
-    ).to(device)
-    with torch.no_grad():
-        prior = train_presence.mean(dim=0).clamp(1e-4, 1 - 1e-4)
-        head.presence.bias.copy_(torch.logit(prior))
-    print(
-        f"head params={sum(p.numel() for p in head.parameters())} pool={args.pool} "
-        f"select_metric={args.select_metric}",
-        flush=True,
-    )
+    tags, label_names, labels = load_labels(args.tags_dir)
+    y, keep = align(np.asarray(feature_names), label_names, labels)
+    feats, y = feats[keep], y[keep]
+    X = pool_features(feats, args.pool)
+    print(f"games_with_labels={X.shape[0]} pooled_dim={X.shape[1]} tags={y.shape[1]} pool={args.pool}", flush=True)
 
-    # Use a softened pos_weight: the raw neg/pos ratio often over-predicts tags.
-    pos = train_presence.sum(dim=0)
-    neg = train_presence.shape[0] - pos
-    pos_weight = (neg / pos.clamp(min=1.0)).clamp(max=args.max_pos_weight)
-    pos_weight = 1.0 + args.pos_weight_strength * (pos_weight - 1.0)
-    presence_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=max(1, args.epochs),
-        eta_min=args.min_learning_rate,
-    )
-    batch_generator = torch.Generator(device=device)
-    batch_generator.manual_seed(args.seed)
+    per_tag_tp, per_tag_fp, per_tag_fn, scored, fold_f1s = cross_validate(X, y, tags, args)
+    summary = summarize(per_tag_tp, per_tag_fp, per_tag_fn, scored, fold_f1s, y, tags, args)
 
-    history = []
-    best_score = -float("inf")
-    best_state = None
-    best_metrics = None
-    plateau_count = 0
-    grad_ema = None
-
-    for epoch in range(1, args.epochs + 1):
-        head.train()
-        epoch_loss = 0.0
-        epoch_presence_loss = 0.0
-        epoch_count_loss = 0.0
-        epoch_seen = 0
-        grad_norms = []
-        for batch_idx in make_minibatches(train_x.shape[0], args.batch_size, batch_generator, device):
-            optimizer.zero_grad(set_to_none=True)
-            outputs = head(train_x[batch_idx])
-            presence_loss = presence_criterion(outputs["presence_logits"], train_presence[batch_idx])
-            count_loss = count_regression_loss(
-                outputs["count_logits"],
-                train_counts[batch_idx],
-                train_presence[batch_idx],
-                args.count_negative_weight,
-            )
-            loss = presence_loss + args.count_loss_weight * count_loss
-            loss.backward()
-            grad_norm = float(torch.nn.utils.clip_grad_norm_(head.parameters(), args.grad_clip))
-            optimizer.step()
-            batch_count = int(batch_idx.numel())
-            epoch_seen += batch_count
-            epoch_loss += float(loss.detach().cpu()) * batch_count
-            epoch_presence_loss += float(presence_loss.detach().cpu()) * batch_count
-            epoch_count_loss += float(count_loss.detach().cpu()) * batch_count
-            grad_norms.append(grad_norm)
-        scheduler.step()
-        loss = epoch_loss / max(1, epoch_seen)
-        presence_loss_value = epoch_presence_loss / max(1, epoch_seen)
-        count_loss_value = epoch_count_loss / max(1, epoch_seen)
-        grad_norm = float(np.mean(grad_norms)) if grad_norms else 0.0
-        grad_ema = grad_norm if grad_ema is None else 0.9 * grad_ema + 0.1 * grad_norm
-
-        head.eval()
-        with torch.no_grad():
-            val_outputs = head(val_x)
-            val_presence_logits_t = val_outputs["presence_logits"]
-            val_count_logits_t = val_outputs["count_logits"]
-            val_presence_loss = presence_criterion(
-                val_presence_logits_t,
-                torch.from_numpy(val_presence).to(device),
-            )
-            val_count_loss = count_regression_loss(
-                val_count_logits_t,
-                torch.from_numpy(val_counts).to(device),
-                torch.from_numpy(val_presence).to(device),
-                args.count_negative_weight,
-            )
-            val_loss = float((val_presence_loss + args.count_loss_weight * val_count_loss).detach().cpu())
-            val_presence_logits = val_presence_logits_t.cpu().numpy()
-            val_count_logits = val_count_logits_t.cpu().numpy()
-        metrics, _ = evaluate_presence(val_presence_logits, val_presence)
-        metrics.update(count_metrics(val_count_logits, val_counts, val_presence))
-        row = {
-            "epoch": epoch,
-            "train_loss": float(loss),
-            "presence_loss": float(presence_loss_value),
-            "count_loss": float(count_loss_value),
-            "val_loss": val_loss,
-            "val_presence_loss": float(val_presence_loss.detach().cpu()),
-            "val_count_loss": float(val_count_loss.detach().cpu()),
-            "lr": float(optimizer.param_groups[0]["lr"]),
-            "grad_norm": grad_norm,
-            "grad_ema": grad_ema,
-            **metrics,
-        }
-        history.append(row)
-
-        score = metric_value(row, args.select_metric)
-        improved = score > best_score + args.min_delta
-        if improved:
-            best_score = score
-            best_metrics = row
-            best_state = {key: value.detach().cpu().clone() for key, value in head.state_dict().items()}
-            plateau_count = 0
-        else:
-            plateau_count += 1
-
-        if epoch == 1 or epoch % args.log_every == 0 or improved:
-            print(
-                f"epoch={epoch:04d} train_loss={row['train_loss']:.4f} val_loss={val_loss:.4f} "
-                f"mAP={metrics['mAP']:.4f} micro_f1={metrics['micro_f1']:.4f} "
-                f"thr={metrics['threshold']:.2f} pred_tags={metrics['predicted_tags_per_game']:.1f} "
-                f"count_mae={metrics['count_mae']:.2f} lr={row['lr']:.2g} "
-                f"grad_ema={grad_ema:.4f} plateau={plateau_count}/{args.patience}",
-                flush=True,
-            )
-
-        # Self-stop: selected validation metric plateau, or the gradient flattened out.
-        if plateau_count >= args.patience:
-            print(f"early stop: no val {args.select_metric} gain for {args.patience} epochs", flush=True)
-            break
-        if args.grad_plateau > 0 and grad_ema < args.grad_plateau:
-            print(f"early stop: smoothed grad norm {grad_ema:.5f} < {args.grad_plateau}", flush=True)
-            break
-
-    if best_state is not None:
-        head.load_state_dict(best_state)
-
-    # Per-tag AP report on the best head.
-    head.eval()
-    with torch.no_grad():
-        final_outputs = head(val_x)
-        final_presence_logits = final_outputs["presence_logits"].cpu().numpy()
-        final_count_logits = final_outputs["count_logits"].cpu().numpy()
-    final_metrics, per_tag_ap = evaluate_presence(final_presence_logits, val_presence)
-    final_metrics.update(count_metrics(final_count_logits, val_counts, val_presence))
-    tags = vocab["tags"]
-    ranked = sorted(
-        [(tags[i], per_tag_ap[i]) for i in range(num_tags) if not np.isnan(per_tag_ap[i])],
-        key=lambda item: -item[1],
-    )
+    if args.export_head:
+        export_linear_probe(X, y, tags, y.sum(axis=0), args, args.checkpoint)
 
     report = {
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "encoder_epoch": enc_epoch,
         "encoder_global_step": enc_step,
         "encoder_cfg": cfg,
-        "num_tags": num_tags,
-        "target_mode": vocab["target_mode"],
-        "head_type": "presence_and_count",
-        "selection_metric": args.select_metric,
-        "count_loss_weight": args.count_loss_weight,
-        "count_negative_weight": args.count_negative_weight,
-        "pos_weight_strength": args.pos_weight_strength,
-        "games_with_labels": int(len(keep)),
-        "train": int(len(train_idx)),
-        "val": int(len(val_idx)),
-        "best_metrics": best_metrics,
-        "final_val_metrics": final_metrics,
-        "top_tags": ranked[:15],
-        "bottom_tags": ranked[-15:],
-        "stopped_epoch": history[-1]["epoch"] if history else 0,
+        "eval": "kfold_cv_fair",
+        "folds": args.folds,
+        "min_train_pos": args.min_train_pos,
+        "pool": args.pool,
+        "classifier": "per_tag_logreg_balanced",
+        "C": args.C,
+        "feature_views": args.feature_views,
+        "sample_fraction": args.sample_fraction,
+        **summary,
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     atomic_text_write(json.dumps(report, ensure_ascii=False, indent=2), args.report_json)
-    if history:
-        columns = list(history[0].keys())
-        lines = ["\t".join(columns)]
-        for row in history:
-            lines.append("\t".join(
-                f"{row[c]:.6g}" if isinstance(row[c], float) else str(row[c]) for c in columns
-            ))
-        atomic_text_write("\n".join(lines) + "\n", args.history_tsv)
-    if not args.no_save:
-        atomic_torch_save(
-            {"head_state_dict": head.state_dict(), "num_tags": num_tags, "tags": tags,
-             "pool": args.pool, "hidden_dims": list(args.hidden_dims),
-             "head_type": "presence_and_count", "report": report},
-            args.head_out,
-        )
 
-    print(
-        f"DONE best_{args.select_metric}={best_score:.4f} final_mAP={final_metrics['mAP']:.4f} "
-        f"micro_f1={final_metrics['micro_f1']:.4f}",
-        flush=True,
-    )
-    print(f"wrote {args.report_json}")
+    print("=" * 64, flush=True)
+    print(f"OVERALL (fair, {args.folds}-fold) micro_f1={summary['micro_f1']:.4f} "
+          f"P={summary['precision']:.3f} R={summary['recall']:.3f}", flush=True)
+    print(f"per-fold micro_f1={summary['fold_micro_f1_mean']:.4f} +/- {summary['fold_micro_f1_std']:.4f}", flush=True)
+    print(f"macro_f1={summary['macro_f1']:.4f} over {summary['scored_tags']}/{summary['total_tags']} scored tags", flush=True)
+    print("frequency-floor breakdown:", flush=True)
+    for row in summary["freq_floor_breakdown"]:
+        print(f"  freq>={row['floor']:3d}: tags={row['tags']:3d} micro_f1={row['micro_f1']:.4f} "
+              f"P={row['precision']:.3f} R={row['recall']:.3f}", flush=True)
+    print(f"wrote {args.report_json}", flush=True)
 
 
 def parse_args():
@@ -729,49 +394,25 @@ def parse_args():
     parser.add_argument("--h5", default=str(DEFAULT_H5))
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
     parser.add_argument("--tags-dir", default=str(DEFAULT_TAGS_DIR))
-    parser.add_argument("--head-out", default=str(DEFAULT_OUT_DIR / "tag_probe_head.pt"))
     parser.add_argument("--report-json", default=str(DEFAULT_OUT_DIR / "tag_probe_report.json"))
-    parser.add_argument("--history-tsv", default=str(DEFAULT_OUT_DIR / "tag_probe_history.tsv"))
-    parser.add_argument("--no-save", action="store_true")
+    parser.add_argument("--export-head", default=None,
+                        help="If set, also fit the final probe on ALL games and save a portable "
+                             "linear artifact here (used by validation.py).")
+    parser.add_argument("--rebuild-features", action="store_true")
 
     parser.add_argument("--feature-views", type=int, default=4,
                         help="Views sampled per game; their codes are averaged into one feature.")
     parser.add_argument("--sample-fraction", type=float, default=0.6)
     parser.add_argument("--cache-dtype", choices=["float16", "float32"], default="float16")
-    parser.add_argument("--pool", choices=["flatten", "mean", "stats"], default="stats")
+    parser.add_argument("--pool", choices=["flatten", "mean", "stats"], default="flatten",
+                        help="flatten (full num_latents*output_dim code) scores highest; "
+                             "stats (mean+std over latents, 2*output_dim) is much faster, ~0.04 lower.")
 
-    parser.add_argument("--solver", choices=["torch", "ridge"], default="torch",
-                        help="torch trains the neural probe; ridge fits a closed-form linear score probe.")
-    parser.add_argument("--ridge-alpha", type=float, default=1.0,
-                        help="L2 regularization strength for --solver ridge.")
-    parser.add_argument("--hidden-dims", type=int, nargs="*", default=[128, 64])
-    parser.add_argument("--dropout", type=float, default=0.15)
-    parser.add_argument("--test-ratio", type=float, default=0.2)
-    parser.add_argument("--stratified-split", action=argparse.BooleanOptionalAction, default=True,
-                        help="Use a greedy multilabel split that keeps rare tags on both sides when possible.")
-    parser.add_argument("--batch-size", type=int, default=64,
-                        help="Probe mini-batch size; <=0 keeps the old full-batch behavior.")
-    parser.add_argument("--select-metric", choices=["micro_f1", "mAP", "val_loss", "precision", "recall"],
-                        default="micro_f1",
-                        help="Validation metric used for best-head selection and early stopping.")
-    parser.add_argument("--learning-rate", type=float, default=3e-3)
-    parser.add_argument("--min-learning-rate", type=float, default=1e-5)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--grad-clip", type=float, default=5.0)
-    parser.add_argument("--max-pos-weight", type=float, default=20.0)
-    parser.add_argument("--pos-weight-strength", type=float, default=0.25,
-                        help="0 disables BCE pos_weight; 1 uses the full clipped neg/pos ratio.")
-    parser.add_argument("--count-loss-weight", type=float, default=0.0,
-                        help="Weight for raw tag-count regression in log1p space.")
-    parser.add_argument("--count-negative-weight", type=float, default=0.02,
-                        help="Small penalty for predicting positive counts on absent tags.")
-    parser.add_argument("--epochs", type=int, default=2000)
-    parser.add_argument("--patience", type=int, default=50,
-                        help="Stop after this many epochs without val mAP improvement.")
-    parser.add_argument("--min-delta", type=float, default=1e-4)
-    parser.add_argument("--grad-plateau", type=float, default=0.0,
-                        help="Stop when the smoothed grad norm falls below this (0 disables).")
-    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--min-train-pos", type=int, default=2,
+                        help="A tag is scored on a fold only if it has >= this many train positives.")
+    parser.add_argument("--C", type=float, default=1.0, help="Inverse L2 strength for per-tag logistic regression.")
+    parser.add_argument("--freq-floors", type=int, nargs="*", default=[5, 10, 20, 30, 40, 60, 80])
     parser.add_argument("--device", default=None)
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -779,7 +420,7 @@ def parse_args():
 
 
 def main():
-    train(parse_args())
+    run(parse_args())
 
 
 if __name__ == "__main__":
