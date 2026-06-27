@@ -1646,7 +1646,7 @@ def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
         "anchor_test_tag_micro_f1": anchor_test.get("micro_f1"),
         "anchor_test_tag_recall": anchor_test.get("recall"),
     }
-    for variant in ("positive", "neutral", "negative"):
+    for variant in ("positive", "neutral", "negative", "noname"):
         payload = real_text_tag.get(variant) or {}
         metrics = payload.get("variant") or {}
         row[f"{variant}_tag_micro_f1"] = metrics.get("micro_f1")
@@ -2011,7 +2011,7 @@ def parse_args():
     )
     parser.add_argument(
         "--train-game-anchor-appids",
-        default="1086940,1091500,1385380",
+        default="1091500,1385380",
         help="Comma-separated appids that are forced into every fixed training subset.",
     )
     parser.add_argument("--cache-mode", choices=["queue", "full"], default="queue")

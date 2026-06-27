@@ -11,8 +11,9 @@ The sweep varies four axes:
 Evaluation is always performed against the full H5 candidate pool (every game in
 the H5, however many there are). A train-game-count of 0 (the default) trains on
 that full pool; positive values train on a seeded subset for the data-size axis.
-The six long diagnostic texts are test-only here; the default description cache
-is the train-only cache that excludes those texts.
+The Cyberpunk 2077 and Across the Obelisk sentiment diagnostic texts are
+test-only here; the default description cache is the train-only cache that
+excludes those texts.
 """
 
 from __future__ import annotations
@@ -418,9 +419,22 @@ def cache_raw_game_vectors(args, appids: list[str], names: list[str], titles: li
 
 def embed_test_cases(args) -> dict:
     cache_path = args.out_dir / "test_case_embeddings.npz"
+    cases = cases_from_defaults()
+    source_paths = [str(case["path"].resolve()) for case in cases]
+    source_mtime_ns = [int(case["path"].stat().st_mtime_ns) for case in cases]
+    source_sizes = [int(case["path"].stat().st_size) for case in cases]
     if cache_path.exists() and not args.rebuild_shared_eval:
         data = np.load(cache_path, allow_pickle=True)
-        return {key: data[key] for key in data.files}
+        cached_paths = [str(x) for x in data["paths"]] if "paths" in data else []
+        cached_mtime_ns = [int(x) for x in data["source_mtime_ns"]] if "source_mtime_ns" in data else []
+        cached_sizes = [int(x) for x in data["source_sizes"]] if "source_sizes" in data else []
+        if (
+            cached_paths == source_paths
+            and cached_mtime_ns == source_mtime_ns
+            and cached_sizes == source_sizes
+        ):
+            return {key: data[key] for key in data.files}
+        print("test case embedding cache is stale; rebuilding.", flush=True)
 
     from game_review_data.embedding_data import LocalEmbedder
 
@@ -432,7 +446,7 @@ def embed_test_cases(args) -> dict:
     sentiments = []
     paths = []
     sentence_counts = []
-    for case in cases_from_defaults():
+    for case in cases:
         text = case["path"].read_text(encoding="utf-8")
         sentences = split_text(text, args.max_text_sentences)
         embedded = np.asarray(embedder.embed(sentences), dtype=np.float32)
@@ -451,6 +465,8 @@ def embed_test_cases(args) -> dict:
         "appids": np.asarray(appids, dtype=object),
         "sentiments": np.asarray(sentiments, dtype=object),
         "paths": np.asarray(paths, dtype=object),
+        "source_mtime_ns": np.asarray(source_mtime_ns, dtype=np.int64),
+        "source_sizes": np.asarray(source_sizes, dtype=np.int64),
         "sentence_counts": np.asarray(sentence_counts, dtype=np.int32),
     }
     with cache_path.open("wb") as handle:
@@ -1048,7 +1064,7 @@ def render_report(rows: list[dict], args) -> str:
         f"- view fraction：{', '.join(f'{v:.1f}' for v in args.sample_fractions)}",
         f"- 对照 arm：{', '.join(args.arms)}（grl=GRL 10 + reco 30；nogrl=GRL 0 + reco 0）。",
         f"- 评估候选池：始终使用全量 {getattr(args, 'num_games', '?')} 款游戏。",
-        "- 测试文本：BG3、Cyberpunk、Across the Obelisk 的官方描述/长文本只在测试阶段使用；训练使用 train-only description cache。",
+        "- 测试文本：Cyberpunk 2077、Across the Obelisk 的 neutral/positive/negative/noname 长文本只在测试阶段使用；训练使用 train-only description cache。",
         f"- 每组合训练预算：epochs={args.epochs}, steps_per_epoch={args.steps_per_epoch}, batch_size={args.batch_size}。",
         "- 训练显存策略：split_recompute，把句嵌入 -> latentArray 的长序列段与后续层次降维分段反传，默认不截断 view。",
         "",
@@ -1127,7 +1143,7 @@ def render_report(rows: list[dict], args) -> str:
         "## 备注",
         "",
         "- N 是训练阶段可见的游戏数量，不是每款游戏的评论条数。",
-        "- BG3、Cyberpunk、Across the Obelisk 三个锚点在每个训练子集里固定保留，以免身份召回测试变成“目标未见过”的外推问题。",
+        "- Cyberpunk 2077、Across the Obelisk 两个锚点在每个训练子集里固定保留，以免身份召回测试变成“目标未见过”的外推问题。",
         "- 高 view 下少数游戏的随机窗口会超过十万句；训练端使用 split_recompute 分段反传来保留全量窗口，max_view_sentences 默认为 0。",
         "- 若某组合 status 不是 done，它不会进入上面的曲线均值；原始 JSON 保存在各组合目录。",
     ])
@@ -1380,7 +1396,7 @@ def parse_args():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-game-seed", type=int, default=20260626)
-    parser.add_argument("--train-game-anchor-appids", default="1086940,1091500,1385380")
+    parser.add_argument("--train-game-anchor-appids", default="1091500,1385380")
     parser.add_argument("--description-cache", default=DEFAULT_DESCRIPTION_CACHE, type=Path)
     parser.add_argument("--eval-feature-views", type=int, default=4)
     parser.add_argument("--eval-sample-fraction", type=float, default=0.6)

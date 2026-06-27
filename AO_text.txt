@@ -1,98 +1,81 @@
-Across the Obelisk 是一个“四人小队制”的协作肉鸽卡牌 RPG：每个角色都有独立牌组，玩家在分支地图上做事件选择、打回合制卡牌战、拿卡/删卡/升级/装备，最终推进四幕冒险。官方把它称为 co-op roguelite deckbuilder，支持单人控制四名英雄，也支持 2-4 人联机协作。Steam 页面也明确标了 Roguelike Deckbuilder / Roguelike / Roguelite / Co-op / Tactical RPG 等标签。(store.steampowered.com)
+Across the Obelisk is a "four-hero squad" cooperative roguelite deckbuilding RPG: each character has their own independent deck, and players make event choices on branching maps, fight turn-based card battles, draft/remove/upgrade cards, and equip items, ultimately progressing through a four-act adventure. The developers refer to it as a co-op roguelite deckbuilder, supporting single-player control of four heroes as well as 2-4 player online co-op.
 
-故事背景
+Story Background
 
-主舞台是 Senenthia 王国。开局发生在公主 16 岁生日当天：她本应被引荐进入 Wizard Academy，但她的房间突然爆炸，一股能量扫过王国；随后公主和国王顾问、宫廷魔法师 Lord Hanshek 一起失踪。王室卫兵找遍城堡无果，派出的士兵也没有回来，只知道踪迹消失在 Old Forest 深处、一个沉睡数百年的古代方尖碑附近。国王于是发布悬赏，要求冒险者找回公主。ATO Wiki 的 Lore 页面就是这样描述序章的。(across-the-obelisk.fandom.com)
+The main setting is the Kingdom of Senenthia. The game opens on the princess's 16th birthday: she was supposed to be introduced to the Wizard Academy, but her room suddenly exploded, sending a wave of energy sweeping across the kingdom; subsequently, both the princess and the king's advisor, court mage Lord Hanshek, vanished. The royal guards searched the castle to no avail, and the soldiers sent out did not return. All they knew was that the tracks vanished deep in the Old Forest, near an ancient obelisk that had slept for hundreds of years. The king thus issued a bounty, calling on adventurers to find the princess. This is how the Lore page of the ATO Wiki describes the prologue. (across-the-obelisk.fandom.com)
 
-官方 Steam 页面给出的主线目标更直接：从叛变的 Lord Hanshek 手中救出国王的女儿，否则她可能死去；玩家队伍的命运和 Senenthia 的命运都取决于这趟旅程。(store.steampowered.com) 所以它的故事骨架是经典奇幻“救公主/救王国”，但真正的内容来自路线上大量事件、角色支线、隐藏节点、可选抉择和反复跑图后逐步拼起来的世界观。
+The official Steam page states the main objective more directly: rescue the king's daughter from the traitorous Lord Hanshek, or she might die; the fate of your party and the fate of Senenthia depend on this journey. (store.steampowered.com) Thus, its story skeleton is the classic fantasy "save the princess / save the kingdom," but the true content comes from the massive number of events, character questlines, hidden nodes, optional choices on the routes, and the worldbuilding gradually pieced together through repeated runs.
 
-地图与章节结构
+Map and Chapter Structure
 
-游戏通常从 Senenthia 出发。第一幕地图上有农田、森林、强盗营地、古树、方尖碑等节点；Wiki 的 Senenthia 地图页列出了大量节点，包括 Town、Caravan、Bandit Camp、Old Tree、Senenthia Obelisk 等。(ato.fandom.com)
+The game usually starts from Senenthia. The Act 1 map has nodes such as farmlands, forests, bandit camps, ancient trees, and an obelisk; the Wiki's Senenthia map page lists a vast array of nodes, including Town, Caravan, Bandit Camp, Old Tree, Senenthia Obelisk, etc. (ato.fandom.com)
 
-到达 Senenthia Obelisk 后，方尖碑会打开多个传送门。Wiki 记录的传送目的地包括火山/炎热区域 Velkarath、沼泽 Aquarfall Marsh、冰冷的 Faeborg Forest、海风区域 Sahti Islands、沙漠 Ulminin Desert 等。(ato.fandom.com) 官方 Paradox 页面也说 Adventure Mode 要打四幕，每幕都有 boss，并会遇到程序生成事件。(paradoxinteractive.com)
+Upon reaching the Senenthia Obelisk, the obelisk opens multiple portals. Portals recorded by the Wiki include Velkarath (volcano/hot zone), Aquarfall Marsh (swamp), Faeborg Forest (icy forest), Sahti Islands (breezy sea area), Ulminin Desert (desert), etc. (ato.fandom.com) The official Paradox page also mentions that Adventure Mode spans four acts, each with a boss and procedurally generated events. (paradoxinteractive.com)
 
-叙事不是线性 JRPG 那种长剧情，而更像桌游跑团：每个节点给你一段场景、几个选择，可能触发战斗、获得钥匙物品、解锁角色/宠物/路线、改变后续事件结果。官方强调“你走哪条路、救谁、放弃谁、帮人还是搜刮战利品”都会影响旅程。(store.steampowered.com)
+The narrative is not a long, linear plot like in classic JRPGs, but rather resembles a tabletop RPG campaign: each node provides a scene description and several choices, which may trigger combat, award key items, unlock characters/pets/routes, or alter the outcomes of subsequent events. The developers emphasize that "the path you take, who you save, who you leave behind, and whether you help others or loot their treasures" will all affect your journey. (store.steampowered.com)
 
-核心玩法循环
+Core Gameplay Loop
 
-组四人队伍：一局一般带四名英雄。单人时你控制全部四人；多人时可以把角色分给 2-4 名玩家。Xbox 官方开发者文把它解释为：每个角色都有自己的独立牌组，四人小队再一起走分支地图、处理选择、支线和关键物品。(news.xbox.com)
+Form a four-hero squad: A run typically consists of four heroes. In single-player, you control all four; in multiplayer, characters can be distributed among 2-4 players. The official Xbox developer article explains it as: each character has their own independent deck, and the four-person squad moves together along branching maps, handling choices, side quests, and key items. (news.xbox.com)
 
+Pre-departure deckbuilding: Choose heroes, assign perks, and prepare the starting deck. The official Steam page notes that players can customize and upgrade decks through XP and perk points. (store.steampowered.com)
 
+Navigate map nodes: Nodes can be combat encounters, events, shops, camps, treasure chests, character unlocks, hidden routes, or bosses. Route choices impact resources, risks, rewards, story, and accessible areas.
 
-出发前构筑：选择英雄、分配 perk、准备初始牌组。官方 Steam 页面写到玩家可以通过 XP 和 perk points 自定义、升级牌组。(store.steampowered.com)
+Fight turn-based card battles: During combat, each hero acts according to their speed, using their own hand and energy. The Wiki Glossary specifies: Energy is used to play cards, with a baseline of 3 energy gained per turn, and unspent energy can carry over to the next turn. (ato.fandom.com)
 
+Post-battle upgrading: Draft new cards, upgrade cards, remove cards, obtain gear, and gain gold/shards/XP, gradually refining each character's deck from "functional" into a "specialized machine."
 
+Classes and Team Roles
 
-走地图节点：节点可能是战斗、事件、商店、营地、宝箱、角色解锁、隐藏路线或 boss。路线选择会影响资源、风险、奖励、剧情和可进入区域。
+The Characters page on the Wiki divides roles into five categories:
 
+Warriors: Main defensive role, specializing in physical damage and block.
 
+Scouts: Utility/jack-of-all-trades, capable of dealing damage, applying poison, drawing cards, and supporting.
 
-打回合制卡牌战：战斗中每个英雄按速度行动，使用自己的手牌和能量。Wiki Glossary 写明：Energy 用来打出卡牌，基础每回合获得 3 点，并且未用完的能量可以累积到下一回合。(ato.fandom.com)
+Mages: Main offensive role, specializing in elemental damage and energy-related abilities.
 
+Healers: Main supportive role, specializing in healing, shields, and mystical damage.
 
+Multiclass: Hybrid classes that use a combined card pool of two professions. (ato.fandom.com)
 
-战后强化：拿新卡、升级卡、删卡、拿装备、获得金币/碎片/经验，逐步把每个角色的牌组从“能用”打磨成“专精机器”。
+This is also the biggest difference between it and many single-character roguelite deckbuilders: you are not just optimizing a single deck, but simultaneously optimizing the synergy among four distinct decks. For example, the Warrior takes charge of Taunt/Block/Fortify, the Mage stacks Burn/Spark/Dark, the Healer manages Regeneration/Bless/Sanctify, and the Scout handles Mark/Poison/card draw/speed control.
 
+Card and Combat Mechanisms
 
+Cards broadly cover functions such as attacking, defending, healing, drawing, buffing, debuffing, speed control, deck manipulation, and energy cycling. The developers state that the base game features 500+ cards, 300+ items, 16 heroes, and four base classes. (store.steampowered.com)
 
-职业与队伍分工
+There are numerous combat keywords, which can be categorized into several core types:
 
-Wiki 的 Characters 页面把角色分为五类：
+Resource: Energy to play cards, Inspire to draw extra cards, and Energize to gain bonus energy next turn.
 
-Warriors：主要防御位，擅长物理伤害和格挡。
+Defense: Block to absorb damage, Shield to grant block next turn, Fortify to prevent block from decaying at the end of the turn, and Taunt to redirect enemy targeting.
 
-Scouts：偏工具人/万金油，可做输出、毒、抽牌、辅助等。
+Buff: Bless to increase damage and healing received, Powerful to increase damage/healing by a percentage, Sharp to enhance slashing/piercing damage, and Stealth to increase damage/healing while preventing direct targeting.
 
-Mages：主要进攻位，擅长元素伤害和能量相关能力。
+Damage over Time (DoT) / Vulnerability: Bleed, Burn, Poison, Dark, Spark, etc.
 
-Healers：主要支援位，擅长治疗、护盾、神秘系伤害。
+Control: Disarm to disable attack cards, Silence to disable spell cards, Paralyze to skip a turn, and Slow/Fast/Haste/Daze for speed control.
 
-Multiclass：混合职业，使用两个职业的牌池组合。(ato.fandom.com)
+Deck Manipulation: Discover to randomly present cards from the class pool, Vanish to remove a card from the current battle after use, and Discard to discard cards from hand. (ato.fandom.com) (ato.fandom.com)
 
-这也是它和很多单角色肉鸽卡牌最大的区别：你不是只优化一个牌组，而是同时优化四个牌组之间的配合。比如战士负责 Taunt/Block/Fortify，法师堆 Burn/Spark/Dark，治疗者负责 Regeneration/Bless/Sanctify，斥候负责 Mark/Poison/抽牌/速度控制。
+Damage calculation is also highly RPG-like: base damage is modified by auras, curses, perks, gear, and active effects, then absorbed by the target's block, and finally subjected to the target's resistance against that specific damage type. (ato.fandom.com) This makes it place a heavier emphasis on stacking and stripping resistances compared to standard "what you see is what you deal" card games.
 
-卡牌与战斗机制
+Equipment, Perks, and Meta-Progression
 
-卡牌大致承担攻击、防御、治疗、抽牌、给 buff、上 debuff、控速、控牌、能量循环等功能。官方说基础游戏有 500+ cards、300+ items、16 heroes、四个基础职业。(store.steampowered.com)
+Equipment alters a character's combat capabilities, such as increasing specific damage types, enhancing aura/curse stacking, or granting on-play effects. The Wiki also mentions that equipping a hero with two identical items will transform them into a corrupted version. (ato.fandom.com)
 
-战斗关键词很多，核心可以分成几类：
+Perks serve as the meta-progression system. As described on the Wiki's Perks page, finishing a run awards experience that increases your player rank, up to a maximum of Rank 50. Each rank awards 1 perk point per character, which can be allocated before starting a run and reset for free. Perks provide minor boosts such as health, starting resources, starting energy, and combat bonuses. (ato.fandom.com)
 
-资源类：Energy 打牌，Inspire 额外抽牌，Energize 下回合获得额外能量。
+Thus, it is a clear-cut roguelite: while routes, events, rewards, and builds vary from run to run, meta-unlocks and perks will progressively strengthen your account and hero pool.
 
-防御类：Block 抵伤，Shield 下回合给格挡，Fortify 让格挡不在回合结束清空，Taunt 吸引敌方目标。
+Game Modes
 
-增益类：Bless 增伤和受治疗，Powerful 百分比增伤/治疗，Sharp 强化斩击/穿刺，Stealth 提升伤害/治疗且不能被直接指定。
+There are three main modes:
 
-持续伤害/易伤类：Bleed、Burn、Poison、Dark、Spark 等。
+Adventure Mode: The story mode, playable solo or with up to 4 players in co-op. Progression and meta-unlocks are primarily tied to this mode. The Wiki describes it as the core mode with a story and meta-progression. (ato.fandom.com)
 
-控制类：Disarm 禁攻击牌，Silence 禁法术牌，Paralyze 跳过回合，Slow/Fast/Haste/Daze 控速度。
+Obelisk Challenge / Obelisk Mode: A more traditional roguelike challenge featuring higher randomness, where players draft their starting decks and encounter more randomized map events. The developers describe this mode as a randomized adventure where you "draft unique decks." (paradoxinteractive.com)
 
-牌组操作类：Discover 随机展示职业牌池中的牌，Vanish 让卡牌使用后本场战斗移除，Discard 丢弃手牌。(ato.fandom.com) (ato.fandom.com)
-
-伤害计算也偏 RPG 化：基础伤害会被光环、诅咒、perk、装备和效果修正，再被目标格挡吸收，最后还要看目标对应伤害类型的抗性。(ato.fandom.com) 这让它比普通“打多少就是多少”的卡牌游戏更强调堆叠和破抗。
-
-装备、Perk 与局外成长
-
-装备会改变角色的战斗能力，比如增加某类伤害、强化 aura/curse 叠层、给打牌触发效果。Wiki 还提到同一英雄装备两个相同物品会变成 corrupted version。(ato.fandom.com)
-
-Perk 是局外成长系统。Wiki 的 Perks 页面说明：跑完一局会获得经验提升玩家 rank，最多 Rank 50；每级给每个角色 1 点 perk point，可以在开局前给角色分配，且可以免费重置。Perk 提供生命、初始资源、初始能量、战斗加成等小幅强化。(ato.fandom.com)
-
-所以它是明显的 roguelite：每局路线、事件、奖励、构筑会变，但局外解锁和 perk 会逐步增强你的账号/英雄池。
-
-游戏模式
-
-主要有三种：
-
-Adventure Mode：故事模式，可单人或最多 4 人联机；解锁和局外成长主要绑定在这里。Wiki 称它是带故事和 meta progression 的基础模式。(ato.fandom.com)
-
-Obelisk Challenge / Obelisk Mode：更传统的 roguelike 挑战，随机性更强，开局通过 draft 组牌，地图事件更随机。官方也说这个模式是“draft unique decks”的随机冒险。(paradoxinteractive.com)
-
-Weekly Challenge：每周挑战，英雄、牌组、地图/规则预设，更多是比技巧和分数。(ato.fandom.com)
-
-它为什么算肉鸽游戏
-
-它的“肉鸽感”主要来自：分支地图、程序生成事件、每局不同奖励、卡牌构筑、随机遭遇、boss 路线、多职业组合、失败后再开一局，以及局外 perk/解锁带来的 roguelite 成长。官方页面也明确把三大模式、随机事件、可重复游玩、构筑实验作为核心卖点。(store.steampowered.com)
-
-简短判断：Across the Obelisk 是很标准的肉鸽卡牌游戏，而且是少见的四角色小队/多人协作型肉鸽卡牌 RPG。 
-
+Weekly Challenge: A weekly challenge featuring preset heroes, decks, maps, and rules, which focuses more on competing for skill and score rankings. (ato.fandom.com)

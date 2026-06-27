@@ -1,1 +1,69 @@
-如果你热爱肉鸽卡牌，又怀念经典RPG的多人组队开荒，那么 Across the Obelisk (方尖碑之后) 绝对是一部不容错过的神作。它精妙地将“回合制卡牌构筑”与“跑团式战术RPG”融合在一起，无论是单人控全场还是 2-4 人联机协作，都能带来极具深度且令人欲罢不能的策略体验。完美的四人小队：从“单打独斗”到“神仙打架”与市面上多数强调单兵作战的肉鸽卡牌不同，本作的核心魅力在于四人小队制（Squad-based）的联动配合。你不是在优化一个牌组，而是在同时调教四个彼此互补的“专精机器”：战士 (Warriors)： 团队的坚实护盾，通过 Taunt 吸引火力，利用 Fortify 让格挡值不再在回合结束时清空。法师 (Mages) & 斥候 (Scouts)： 核心输出与控场，擅长堆叠 Burn、Spark、Poison 等持续伤害，或利用 Mark 和速度控制玩弄敌人。治疗者 (Healers)： 提供 Regeneration 和护盾保障，用神秘系伤害进行全方位支援。混合职业 (Multiclass)： 融合双职业牌池，为队伍构筑带来无限的化学反应。游戏拥有 500+ 张卡牌、300+ 种装备以及 16 位英雄，当法师的元素异常、斥候的抽牌速攻与治疗者的增益完美咬合时，那种精妙计算带来的爽快感是无可比拟的。战术流卡牌：硬核、深度与数值的艺术游戏的战斗机制极其扎实，完美吸收了传统 RPG 的严谨与卡牌游戏的灵动：核心机制亮点： 基础每回合获得 3 点能量（Energy），但未用完的能量可以累积到下一回合。这让玩家能够主动控制节奏，在关键回合爆发致胜。游戏的伤害计算非常硬核，基础伤害会受到光环、诅咒、Perk、装备的层层修正，被格挡吸收后，还要计算目标对应伤害类型的抗性。这种“破抗”与“叠层”的设定让每一场战斗都变成了有趣的数字解谜。此外，若同一英雄装备两个相同物品，还会合成为更强力的腐蚀版本（Corrupted version），充满惊喜。跑团式叙事：在多变的章节中谱写冒险主线故事虽然是经典的“救公主、救王国”，但其真正的血肉填满在四幕冒险的分支路线中。冒险从 Senenthia 王国出发，穿过农田与强盗营地。当你激活古老方尖碑后，多种风格迥异的传送门将被打开：Velkarath： 烈火蔓延的炎热区域。Aquarfall Marsh： 危机四伏的泥泞沼泽。Faeborg Forest： 冰封万里的寒冷森林。以及海风肆虐的 Sahti Islands 和荒凉的 Ulminin Desert。每个节点都像是一场桌面 RPG 的跑团：一段场景描写，几个命运抉择。你走哪条路、救谁、放弃谁、帮人还是搜刮，不仅会触发不同的战斗，还能解锁隐藏的宠物、角色、钥匙物品，甚至彻底改变后续的剧情走向。丰富的游戏模式与扎实的局外成长无论你是想沉浸式体验一整个下午的史诗冒险，还是只想来一把纯粹的肉鸽挑战，游戏提供的三大模式都能完美满足：游戏模式 (Modes)玩法核心与特色 (Core Experience)Adventure Mode (冒险模式)带有完整故事和局外成长（Meta-progression）的基础主线。Obelisk Challenge (方尖碑挑战)更纯粹的 Roguelike。开局通过 Draft（轮抽）组牌，地图与事件随机性更强。Weekly Challenge (每周挑战)预设英雄、牌组与规则，全凭技术争夺高分。同时，游戏内置了非常良性的 Perk 局外成长系统（最高可达 Rank 50）。每局获得的经验能为你提供 Perk 点数，在开局前自由分配以提升初始能量或资源，并且支持免费重置。每一次失败都不会是徒劳，它只会让你在下一次推开方尖碑大门时，变得更加强大。总结而言： Across the Obelisk 是一款将战术广度、机制深度与联机乐趣发挥到极致的标杆级作品。无论你是卡牌构筑的死忠，还是策略RPG的拥趸，这趟拯救 Senenthia 的旅程都绝对值回票价。
+Reaching the Pinnacle of the Roguelite Deckbuilder Crown: Why Across the Obelisk is a Rare, Timeless Masterpiece
+
+In the vast starry sky of Roguelite deckbuilding games, few works can seamlessly merge the "depth of hardcore strategy" with the "warmth of multiplayer synergy" to forge a breathtaking, hall-of-fame monument like Across the Obelisk. Officially defined as a "four-hero squad" co-op roguelite deckbuilder, it not only allows a single player to command four heroes single-handedly but also features an ingenious multiplayer mechanic that supports 2 to 4 players fighting side by side. This is by no means a simple stacking of decks, but a grand campaign that pushes personal wisdom and team collaboration to their absolute limits!
+
+Epic Prologue: A Grand Fantasy Scroll Leaping Off the Page
+
+The story of Across the Obelisk begins in a charming yet conspiracy-shrouded dawn in the Kingdom of Senenthia. On the brilliant day of the princess's 16th birthday, a sudden, massive explosion in her chamber and mysterious energy waves sweeping through the kingdom shattered the long-lasting peace. The princess vanished into thin air alongside the deeply trusted royal advisor and court mage, Lord Hanshek. When the royal guards lost their trail deep within the Old Forest, right beside an ancient obelisk that had slept for centuries, the king issued a kingdom-wide bounty.
+
+The game's ultimate mission strikes directly at the heart: rescue the imprisoned princess from the treacherous Lord Hanshek and save a kingdom on the brink of collapse! Despite its classic, royal-fantasy backbone, what is most commendable about this title is its massive narrative ambition. The flesh and blood of the game are hidden within every branch of the map path, piecing together a grand yet detailed worldview for players through a wealth of random events, character side quests, and hidden choices. This is no dull, linear spoon-feeding, but a legendary tabletop-style campaign filled with unknowns and epic scale, written by the players themselves.
+
+Cosmic Scroll: A Wonderfully Branching Exploration Like a Tabletop RPG
+
+The game's four-act adventure unfolds slowly from the lush lands of Senenthia, with the first act map interwoven with farmlands, dark forests, bandit camps, ancient trees, and majestic obelisks. When players hack their way through to the Senenthia Obelisk, the game’s true, grand scope is suddenly revealed—the obelisk will open portals to a multiverse!
+
+Whether it is Velkarath, famed for its scorching volcanoes; the muddy and treacherous Aquarfall Marsh; the freezing Faeborg Forest; the sea-breeze-whipped Sahti Islands; or the dust-blown Ulminin Desert, each region possesses a unique ecosystem and crisis. Procedurally generated random events ensure that every exploration is entirely unique. The game discards the linear shackles of traditional JRPGs, choosing instead to embrace the charming mechanics of TTRPGs (Tabletop Role-Playing Games). Every node presents a beautifully crafted situational description and choice, and your every action—whether to help someone or loot them, to offer redemption or abandon them—will act as a butterfly's wing, profoundly altering subsequent combat, the acquisition of keys and items, and even the unlocking of pets. This journey, so full of a sense of agency, is utterly mesmerizing.
+
+Perfect Cycle: The Artistic Spark of Deckbuilding and Combat
+
+This masterpiece has polished the essence of Roguelite—"in-run deckbuilding" and "turn-based combat"—to absolute perfection. Its core loop operates like a precisely calibrated Swiss watch:
+
+Before setting off, players must carefully handpick their four-member team, allocate perk points, and tweak their starting deck. During the journey, players must plan their path step by step, making critical decisions among combat, random events, shops, camps, treasure chests, and boss fights.
+
+Once in combat, the game's unique "speed chain" and "energy accumulation" mechanics are nothing short of a stroke of genius. Heroes act in order based on their speed. The baseline Energy required to play cards is 3 per turn, but the most stunning design is that any unspent Energy in the current turn carries over perfectly to the next! This mechanism completely revitalizes the strategic space, turning "hoarding cards for bursts" and "tempo control" into an art form.
+
+Loot resolution is incredibly satisfying. Acquiring new cards, upgrading cards, purging cards, equipping god-tier gear, and earning gold and shards allow players to witness firsthand their four-character deck evolve from its initial "baby steps" into a devastating, seamlessly coordinated "perfect killing machine."
+
+Five Major Archetypes: Exquisite Multi-Dimensional Synergy
+
+The greatest strategic shock of Across the Obelisk lies in how it completely shatters the limitations of single-character card games, requiring players to simultaneously optimize four entirely independent decks. The game cleverly constructs a system of five major classes/archetypes:
+
+Warriors: An indestructible iron wall, specializing in physical output and blocking;
+
+Scouts: All-purpose utility players who control the battlefield, specializing in poisoning, card draw, and speed manipulation;
+
+Mages: Devastating offensive cores, manipulating wild elemental forces and energy cycles;
+
+Healers: The holy beacons of the team, providing regeneration, shields, and mystical holy damage;
+
+Multiclass: Boundary-breaking prodigies capable of cross-class deck combinations, bringing infinite possibilities.
+
+In this game, "flying solo" is completely discarded, replaced instead by an unparalleled aesthetic of synergy. Warriors use Taunt and Fortify to shield their teammates; Mages melt enemies with Burn and Spark; Healers maintain health bars with Regeneration and Sanctify; and Scouts carry out silent assassinations using Mark and Poison. The four decks shine together at the player's fingertips, weaving the most magnificent storm of combos.
+
+Detail Obsessive: A Vast Card Library and Hardcore RPG Mechanics
+
+The game showcases awe-inspiring sincerity in its volume of content: over 500 meticulously designed cards, over 300 pieces of equipment with varying attributes, and 16 distinct heroes construct a near-infinite strategic universe.
+
+Its rich combat mechanics are incredibly satisfying. Resource-related effects like Inspire (draw cards) and Energize (gain energy) make hand management silky smooth; defensive mechanics like Block, Shield, and Fortify (preventing block from decaying at the end of turns) build a multi-layered defense; buff mechanics like Bless, Powerful, Sharp, and Stealth scale damage output exponentially; there are also damage-over-time effects like Bleed and Dark, ultimate crowd control like Disarm, Silence, Paralyze, and Slow/Haste speed manipulation, and even advanced deck operations like Discover, Vanish, and Discard—it has everything.
+
+Even more astounding is its combat calculations, which possess immense RPG depth: base damage undergoes multiple modifiers from auras, curses, Perks, and equipment, is absorbed by the opponent's block, and finally faces strict mitigation through the resistance system. This hardcore design of resistance shredding and buff stacking makes every massive damage number feel incredibly rewarding!
+
+Growth and Metamorphosis: Exquisite Perks and Metaprogression
+
+Not only is the run-to-run gameplay spectacular, but the metaprogression system is also highly addictive. The equipment system is incredibly interesting: when the same hero equips two completely identical items, they can fuse into a powerful Corrupted version, offering the ultimate temptation of high risk and high power.
+
+The metaprogression Perk system is the solid foundation of player growth. Every run filled with sweat and glory translates into player Rank experience (up to level 50). With each level gained, all heroes receive 1 valuable talent point, used before starting a run to customize details like health, starting energy, and combat bonuses. Best of all, the system fully supports free, non-destructive respecs, encouraging players to conduct wild, imaginative build experiments. This interweaving of randomized in-run roguelite elements and steady out-of-run progression generates a magical "just one more run" charm.
+
+Three Major Modes: The Perfect Answer to Ultimate Replayability
+
+To cater to all types of players, the game thoughtfully provides three distinct yet equally thrilling modes:
+
+Adventure Mode: An epic campaign journey, serving as the core stage for unlocking new heroes, immersing oneself in the story, and accumulating metaprogression perks.
+
+Obelisk Challenge: The ultimate sanctuary for pure roguelike players! Starting directly with a highly randomized "Draft deckbuilding" stage, stripping away metaprogression, and engaging in the purest duel of skill across random maps.
+
+Weekly Challenge: Using official pre-set heroes, decks, and quirky rules to challenge global players to the limits of intelligence and scoring.
+
+Conclusion
+
+Across the Obelisk is by no means a mediocre amalgamation of cards, but a masterpiece that perfectly melts a fantasy worldview, tabletop RPG fun, ultimate four-deck synergy, and hardcore RPG numerical design into a single pot. Whether you prefer strategizing alone, finely controlling four characters, or yearn to stand shoulder-to-shoulder with close friends, trusting each other with your backs in the perilous world of the Obelisk, it will bring you hundreds of hours of non-repetitive, exhilarating, and ultimate enjoyment. This is, without a doubt, the crowning achievement of the roguelite deckbuilding world!

@@ -236,7 +236,7 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-game-seed", type=int, default=20260626)
-    parser.add_argument("--train-game-anchor-appids", default="1086940,1091500,1385380")
+    parser.add_argument("--train-game-anchor-appids", default="1091500,1385380")
     parser.add_argument("--description-cache", default=sweep.DEFAULT_DESCRIPTION_CACHE, type=Path)
     parser.add_argument("--eval-feature-views", type=int, default=4)
     parser.add_argument("--eval-sample-fraction", type=float, default=0.6)

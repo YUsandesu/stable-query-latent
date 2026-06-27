@@ -1,42 +1,59 @@
-表面上，《赛博朋克 2077》提供了一个宏大的夜之城和看似深度的 RPG+FPS 框架，但在实际体验中，这些机制的缝合感、玩法的失衡以及剧情上的撕裂，让这场赛博朝圣变成了一次充满挫败感的体验。
+The Illusion of Night City: A Critical Deconstruction of Cyberpunk 2077's Mechanics and Narrative
 
-以下是基于核心事实与剧情脉络的否定性批判：
+After the overwhelming hype bubble burst, Cyberpunk 2077 exposed its truest colors: a crude sandbox that masks compromised design with flashy neon lights and barely keeps running with heavy patching, alongside a fatalistic tragedy that uses "destiny" to disguise the player's utter helplessness.
 
-一、 臃肿且失衡的游戏机制
-看似自由度极高的系统，拆解开来不过是传统 RPG 要素的生硬堆砌与对 FPS 射击体验的妥协。
+I. A Compromised and Piecemeal System: The Shackled "Survival Law"
 
-1. 沦为摆设的出身与数值堆砌
-名存实亡的出身（Lifepath）： 流浪者、街头小子和公司员工的划分，除了前 10 分钟极其敷衍的序章剧情和后续对话中无关痛痒的嘴炮选项外，对游戏的核心走向没有任何实质性影响。
+The game's progression system is essentially an elaborate deception. In the prologue, the game offers you three seemingly grand "Lifepaths"—Nomad, Street Kid, and Corpo. Yet, apart from providing a brief, ten-minute prologue that has zero impact on the grand scheme of things and some subsequent inconsequential dialogue options, they do absolutely nothing to change your fundamental nature as a corporate/street "cog in the machine."
 
-生搬硬套的五大属性： 所谓的肉体、反应、技术、智力和镇定，不过是将传统奇幻 RPG 的“力量、敏捷、智力、潜行”换了层科幻皮。技能树在 2.0 版本虽然经过重构，但依然无法掩盖其核心只是在玩“提升暴击、增加免伤”的数字游戏，缺乏真正改变游戏玩法的质变设计。
+The so-called five core attributes feel more like a clumsy imitation of traditional RPG clichés:
 
-2. 破坏平衡的义体与战斗流派
-破坏AI的操作系统： 游戏为了彰显义体的“强大”，导致了严重的平衡性崩坏。无论是让时间近乎静止的斯安威斯坦（时停），还是纯粹叠数值的狂暴组件，一旦成型就会让敌人的 AI 彻底变成待宰的木桩，让本该核心的战斗策略荡然无存。
+Body simplifies combat into aesthetic-free brute brawls and crude shotgun blasts;
 
-机制尴尬的三大枪械：
+Reflexes, despite introducing flashy katana-slashing and time-dilation, turns combat into unrealistic visual light pollution;
 
-动能武器： 所谓的“子弹反弹”机制在混乱的第一人称战斗中极其鸡肋，几乎没有人会去计算折射角度。
+Technical Ability, under the guise of "cyberware enhancement," in reality becomes a numerical trash bin that forces players to stack stats just for armor and cyberware capacity;
 
-技术武器： 蓄力穿墙功能直接变成了“官方外挂”，玩家只需躲在绝对安全的掩体后隔墙盲戳，战斗变得枯燥乏味。
+Intelligence reduces netrunning offenses and defenses to a boring minigame of staring at enemies from afar to kill them, completely stripping away the tension of technological warfare;
 
-智能武器： 自动寻向子弹确实降低了门槛，但它同时也彻底剥夺了射击游戏最核心的“瞄准乐趣”，让战斗变成了无脑的按住左键。
+Cool nominally focuses on stealth and assassination, but in the face of the game's bug-ridden, brain-dead AI, these stealth mechanics feel redundant and clumsy.
 
-二、 强行喂苍蝇、充满叙事撕裂的故事脉络
-剧情在剧作结构上犯了极其严重的“游玩与叙事脱节”大忌，最终的结局更是给玩家长达数十小时的奋斗泼了一盆冷水。
+The Cyberware system, praised as the soul of the game, is actually a form of artificial "decision paralysis" created by restricting player freedom. Operating systems force you into a binary, mutually exclusive choice between a Cyberdeck (playing as a boring netrunner) and a Sandevistan or Berserk component (playing as a tedious time-stopping/damage-immune berserker). Double jumps or Optical Camo do manage to marginally improve vertical exploration, but they simultaneously expose the embarrassment of Night City’s massive invisible walls and unfinished textures. Meanwhile, the seemingly badass Mantis Blades, Gorilla Arms, Monowire, and Projectile Launch System are, in actual combat, nothing more than redundant melee alternatives stuffed into your flesh.
 
-1. 偷懒的剧情杀与设定杀（序章）
-故事的开端完全建立在一场逻辑漏洞百出的“惊天大单”上。为了强行推动 Relic 芯片的植入，剧情不惜以极其刻意的手法让好兄弟杰克“剧情杀”领便当。而主角 V 被中间人德克斯特一枪爆头后，居然能靠芯片里的“纳米科技”强行复活，这种主角光环式的机械降神，显得极其粗糙和偷懒。
+Even the so-called three firearm archetypes are rife with mechanical corner-cutting:
 
-2. 极其割裂的共生挣扎（发展）
-主线与玩法的巨大撕裂： 医生警告 V 他的生命只剩下最后的几个星期，芯片正在像晚期癌症一样吞噬他的大脑。这种“火烧眉毛”的紧迫感，却与开放世界的玩法产生了巨大的冲突——玩家不得不一边看着 V 在过场动画里痛苦咳血，一边在游戏里悠闲地逛街、帮路人找猫、买豪车、做无关紧要的支线。
+Power Weapons: The ricochet mechanic is virtually useless in chaotic real combat; very few players can actually utilize deflections to hit enemies hiding behind cover.
 
-强行绑定的“说教人格”： 强尼·银手（Johnny Silverhand）这个所谓的传奇摇滚小子，在实际表现中只是一个自私自利、满嘴脏话的狂热恐怖分子。游戏强行让他的意识在 V 的脑子里安家，逼迫玩家去感同身受他的偏执。
+Tech Weapons: Charged shots that penetrate walls completely destroy the cover logic of level design, turning combat into a dull experience akin to using a wall-hack.
 
-3. 虚无且毫无正向反馈的终局抉择
-当玩家历经千难万险，终于在各路盟友的牺牲下杀入了荒坂塔的核心服务器“神舆”时，编剧却用一种极度廉价的“赛博朋克式虚无”狠狠背叛了玩家：
+Smart Weapons: Micro-guided homing bullets are essentially "official aimbots" that completely strip away the player's basic satisfaction of aiming and shooting.
 
-无论你此前做出了多少努力，奥特 AI 都会告诉你：肉体已经坏死，V 依然只能活半年。
+II. A Tragedy of Fate and Nihilism: A Narrative Stripped of Player Agency
 
-你面临的所谓“多种结局”，无非是在“慢性死亡（星星/太阳结局）”、“沦为公司的数字奴隶（恶魔结局）”或者“直接把身体拱手让给抢你脑子的强尼（节制结局）”这几种毫无希望的坏结局里，挑选一个让你心里稍微不那么堵得慌的选项。
+If the game mechanics are mediocre compromises, the main storyline of Cyberpunk 2077 is a futile struggle stripped of player autonomy, filled with helplessness and irony.
 
-这种“无论你怎么挣扎，你都是个失败者”的剧作导向，让玩家在夜之城付出的所有热血、牺牲和时间，最终都变成了一场虚无的自嗨。
+It all begins with that absurd and fatal heist. The protagonist, V—a low-life mercenary in Night City blinded by greed and the desire for fame—stupidly takes on a high-risk, high-reward job far beyond their capabilities with their best friend Jackie Welles: infiltrating Arasaka Corporation's luxury hotel to steal the experimental Relic chip. The operation fails disastrously as expected when they witness the patricidal tragedy of Yorinobu Arasaka strangling his own father, Saburo Arasaka, and framing an assassin. In their frantic escape, Jackie is mortally wounded. To protect the fragile chip, V is forced to slot the Relic into their own brain, only to be immediately betrayed and shot in the head by the fixer, Dexter DeShawn.
+
+Yet, death does not grant V a clean break. The Relic chip uses nanotechnology to repair V's brain, only to usher in a far more cruel torture: it activates the digital consciousness (Engram) of Johnny Silverhand, the arrogant, paranoid terrorist/rockerboy who blew up Arasaka Tower 50 years ago. This hubristic soul begins to ruthlessly erode and overwrite V's remaining memories like terminal cancer. The ripperdoc Viktor's diagnosis makes it brutally clear: V's body has only a few weeks left, and they will eventually be entirely overwritten by a dead man's ghost.
+
+To survive, V begins to scurry around like a headless chicken, begging for scraps among Night City's various factions:
+
+You kidnap the selfish chip developer Anders Hellman, only to find no cure;
+
+You are forced to beg the cold and sinister Voodoo Boys for help, trying to contact the rogue AI Alt Cunningham beyond the Blackwall, only to end up as a mere pawn in their chess game.
+
+Throughout your frantic search, you meet the nomad Panam Palmer, the detective River Ward, and the bar girl Judy Alvarez, seemingly forging deep bonds. Yet in your slowly rotting mind, you are forced to compromise with the parasite Johnny Silverhand, descending into a pathetic, Stockholm-syndrome-like symbiosis.
+
+When all struggles lead to a dead-end, Arasaka Tower's server, Mikoshi, becomes your sole remaining hope. No matter which path you choose:
+
+Whether you risk everything with the Aldecaldos, letting countless innocent nomads die for your sake (The Star ending);
+
+Whether you surrender and compromise with Hanako Arasaka, selling your soul and dignity to the corporation for a hollow, living-dead existence (The Devil ending);
+
+Whether you hand over control of your body to Johnny, watching your old friend Rogue die for you in Arasaka Tower once more (The Sun / Temperance ending);
+
+Or even go in guns blazing, alone, in a suicidal charge to find a brief moment of tragic glory (Don't Fear the Reaper / Hidden ending).
+
+In the digital ruins of Mikoshi, the AI Alt Cunningham will always slap you with a harsh reality: your destiny has already been sealed, and your body has degraded too far. Even after stripping Johnny's consciousness away, your body is left with a mere six-month lifespan. If you refuse, you must surrender your physical form entirely to Johnny, reducing yourself to a spectral stream of data wandering the vast, empty expanse of cyberspace.
+
+Whether you return to a dying shell with only six months of hopeless existence, or yield everything to a ghost from the past—Cyberpunk 2077 uses this quintessential cyberpunk dark humor to teach players one final lesson: in this hell constructed of neon and steel, all your struggles and rebellions have, from the very beginning, been nothing but a slow-motion suicide.

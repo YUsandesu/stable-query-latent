@@ -6,8 +6,9 @@ Protocol:
 * Select alpha and a global decision threshold on anchor validation games.
 * First evaluate held-out anchor features to measure normal test-set TAG
   generalization.
-* Then evaluate every available positive/neutral/negative real-text variant with
-  the same fixed probe to measure text generalization and sentiment impact.
+* Then evaluate every available positive/neutral/negative/noname real-text
+  variant with the same fixed probe to measure text generalization, sentiment
+  impact, and whether identity depends on proper-name shortcuts.
 * Report cosine from each real-text variant to its anchor.
 """
 
@@ -28,11 +29,12 @@ from VICReg_review.identity_diagnostic import encode_text_centroid, l2_normalize
 from VICReg_review.train_tag_probe import load_labels
 
 
-VARIANTS = ("positive", "neutral", "negative")
+VARIANTS = ("positive", "neutral", "negative", "noname")
 VARIANT_ALIASES = {
     "positive": ("positive", "postive", "pos"),
     "neutral": ("neutral", "middle", "base"),
     "negative": ("negative", "neg"),
+    "noname": ("noname", "no_name", "nameless", "deidentified", "deidentified_names"),
 }
 DEFAULT_ALPHAS = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
 
@@ -76,11 +78,13 @@ def legacy_text_path(root: Path, appid: str, variant: str) -> Path | None:
             "positive": root / "2077_text_postive.txt",
             "neutral": root / "2077_text.txt",
             "negative": root / "2077_text_negative.txt",
+            "noname": root / "2077_noname.txt",
         },
         "1385380": {
             "positive": root / "AO_text_postive.txt",
             "neutral": root / "AO_text.txt",
             "negative": root / "AO_text_negative.txt",
+            "noname": root / "AO_text_noname.txt",
         },
     }
     path = legacy.get(str(appid), {}).get(variant)
@@ -117,9 +121,24 @@ def discover_variant_records(root: Path, names: list[str], appids: list[str]) ->
 
 
 def load_or_embed_variant_texts(args, records: list[VariantRecord], cache_path: Path) -> dict:
+    source_paths = [str(record.path.resolve()) for record in records]
+    source_mtime_ns = [int(record.path.stat().st_mtime_ns) for record in records]
+    source_sizes = [int(record.path.stat().st_size) for record in records]
+    source_variants = [record.variant for record in records]
     if cache_path.exists() and not getattr(args, "rebuild_text_variant_cache", False):
         data = np.load(cache_path, allow_pickle=True)
-        return {key: data[key] for key in data.files}
+        cached_paths = [str(x) for x in data["paths"]] if "paths" in data else []
+        cached_mtime_ns = [int(x) for x in data["source_mtime_ns"]] if "source_mtime_ns" in data else []
+        cached_sizes = [int(x) for x in data["source_sizes"]] if "source_sizes" in data else []
+        cached_variants = [str(x) for x in data["variants"]] if "variants" in data else []
+        if (
+            cached_paths == source_paths
+            and cached_mtime_ns == source_mtime_ns
+            and cached_sizes == source_sizes
+            and cached_variants == source_variants
+        ):
+            return {key: data[key] for key in data.files}
+        print("text variant embedding cache is stale; rebuilding.", flush=True)
 
     from game_review_data.embedding_data import LocalEmbedder
 
@@ -148,6 +167,8 @@ def load_or_embed_variant_texts(args, records: list[VariantRecord], cache_path: 
         "names": np.asarray([r.name for r in records], dtype=object),
         "variants": np.asarray([r.variant for r in records], dtype=object),
         "paths": np.asarray([str(r.path) for r in records], dtype=object),
+        "source_mtime_ns": np.asarray(source_mtime_ns, dtype=np.int64),
+        "source_sizes": np.asarray(source_sizes, dtype=np.int64),
     }
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("wb") as handle:
@@ -389,8 +410,10 @@ def evaluate(args, encoder, feats: np.ndarray, feature_names: list[str], combo_d
         "sentiment_effect": {
             "positive_minus_neutral_micro_f1": metric_delta("positive", "neutral", "micro_f1"),
             "negative_minus_neutral_micro_f1": metric_delta("negative", "neutral", "micro_f1"),
+            "noname_minus_neutral_micro_f1": metric_delta("noname", "neutral", "micro_f1"),
             "positive_minus_neutral_recall": metric_delta("positive", "neutral", "recall"),
             "negative_minus_neutral_recall": metric_delta("negative", "neutral", "recall"),
+            "noname_minus_neutral_recall": metric_delta("noname", "neutral", "recall"),
         },
         "anchor_cosine": cos_by_variant,
         "cosine_rows": cosine_rows,

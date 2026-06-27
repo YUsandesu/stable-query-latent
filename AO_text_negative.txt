@@ -1,25 +1,69 @@
-《Across the Obelisk》是一款将经典奇幻“救公主”包装成四卡组联动的肉鸽卡牌游戏，却不幸在海量机制堆砌、高负荷的局内计算与冗长的局外养成中，沦为了让人身心俱疲的“硬核硬座模拟器”。
+A Numerical Swamp Turned Work Simulator: Why Across the Obelisk is an Exhausting and Punishing "Pseudoroguelike"
 
-臃肿的四人小队：从“协作肉鸽”沦为“在线加班”
-游戏主打的“四人小队制”构筑（Co-op Roguelite Deckbuilder），在实际体验中是一场不折不扣的灾难。
+Under the wave of Roguelite deckbuilders, many titles attempt to cover up their mechanical bloat by desperately cramming in content, and Across the Obelisk is a prime example of this trend. The developers brand it as a "four-hero party" co-op roguelite deckbuilder. However, this so-called "innovation" degrades into a complete disaster in practice. When playing solo, you are forced to micromanage the decks of four heroes simultaneously like an exhausted puppeteer, with your brain constantly on the verge of overload. Once you start a 2-to-4 player online co-op session, the game completely devolves into a "dead-time waiting simulator," where players must spend endless stretches of time watching their teammates calculate complex card combos, turning what should be a smooth card-playing rhythm into something fragmented and agonizing.
 
-单人游玩的“精神分裂”：你必须一个人同时伺候四个英雄的独立牌组。既要管战士（Warriors）的嘲讽格挡，又要管斥候（Scouts）的控速上毒，还要盯着法师（Mages）的元素输出和治疗者（Healers）的驱散。整局游戏就像一个人同时在下四盘围棋，大脑时刻处于过载边缘。
+A Pale Skeleton: A Fantasy Cliché Drowned in Dull Numbers
 
-多人联机的“时间黑洞”：一旦拉上朋友开黑，由于每个节点都需要共同做事件抉择，且战斗中每个英雄按速度轮流出手，未用完的能量（Energy）还可以累积到下一回合——这意味着每一轮高难战斗都会变成漫长的“民主议会”。你必须眼睁睁看着队友为了算计下回合的连招，对着手牌长考十分钟，硬生生把肉鸽游戏的快节奏爽感拖成了沉闷的“回合制坐牢”。
+The story of Across the Obelisk is set on what should have been a peaceful morning in the kingdom of Senenthia. On the princess's 16th birthday, her room mysteriously explodes, a wave of energy sweeps across the kingdom, and subsequently, both the princess and the court mage Lord Hanshek vanish into thin air. The royal guards lose the trail near an ancient obelisk in the deepest part of the Old Forest, forcing the king to issue a bounty.
 
-机制的暴政：被抗性与关键词淹没的“数学题”
-官方宣称游戏拥有 500+ 卡牌、300+ 装备以及极其丰富的状态关键词，但这种“丰富”是用极端臃肿的数学公式堆出来的。
+The ultimate goal of the game is cliché to the extreme: defeat the traitorous Lord Hanshek, rescue the princess, and save the fate of the Kingdom of Senenthia. Although the developers claim to have built a grand world with a massive number of events along the routes, character side quests, and hidden choices, in reality, these plotlines feel extremely disjointed amidst the endless map-traversing and numerical clashes. Players have absolutely no time to care about any fantasy epic; the so-called "tabletop RPG legend" is quickly worn away by cookie-cutter event texts and mechanized choices. The empty narrative skeleton fails entirely to sustain the player's enthusiasm for repeated playthroughs.
 
-计算重于策略：在这款游戏里，打出一张牌的伤害不是字面写多少就是多少。你必须先计算基础值，再叠加 Powerful 等增益，接着计算 Bleed、Burn、Spark 等层数，最后还要去扣除怪物的 Block/Fortify，并对冲其密密麻麻的属性抗性。
+False Branches: Formulaic Maps That Force Players to "Memorize Layouts"
 
-千篇一律的公式化套路：虽然游戏设计了从塞嫩西亚（Senenthia）到火山（Velkarath）、沼泽（Aquarfall Marsh）等截然不同的四幕地图，但面对极度RPG化的数值设计，玩家的构筑容错率极低。不管你拿了什么神奇装备，核心永远是在一成不变的“战士叠盾、辅助控速、主C叠Buff破抗”的公式里当没有感情的流水线工人。
+The game typically starts in Senenthia, with the Act 1 map seemingly densely packed with nodes like farmlands, forests, bandit camps, ancient trees, and obelisks. However, this so-called "free exploration" is merely a surface-level illusion. When players reach the obelisk and open portals to different regions such as the volcano (Velkarath), the swamp (Aquarfall Marsh), the ice fields (Faeborg Forest), the islands (Sahti Islands), or the desert (Ulminin Desert), what awaits them is not a novel adventure, but a carbon-copy repetition of the same progression.
 
-事件叙事的割裂感：
-游戏的主线极其俗套——从叛变的 Lord Hanshek 手中救回失踪的公主。为了掩盖主线的苍白，游戏在地图上塞满了类似桌游跑团的随机节点。然而这种碎片化叙事非但没有史诗感，反而因为频繁的“投骰子、拿钥匙、解锁特定宠物”等繁琐支线，彻底打碎了卡牌构筑应有的流畅感。
+Although every node attempts to create the immersion of a tabletop session, these procedurally generated events severely lack a reasonable margin for error. Whichever path players take, whoever they choose to rescue or abandon, it is often accompanied by harsh, punishing mechanisms. After experiencing a few bitter lessons where choosing the wrong narrative branch leads directly to a total party wipe, players quickly realize that free choice is a lie—you must constantly cross-reference the Wiki and "memorize" the optimal routes and key item locations as if reciting a textbook. This completely kills the precious random fun of a roguelike game, turning the journey into a surprise-free, mechanical chore.
 
-伪肉鸽的本质：被 Rank 50 绑架的局外“肝报”
-作为一款 Roguelite 游戏，《Across the Obelisk》最令人窒息的是其严重的局外成长依赖，这几乎摧毁了 Roguelike 游戏“凭借技术和运气逆天改命”的纯粹乐趣。
+Bloated Loop: Suffocatingly Tedious Setups and Combat
 
-游戏存在一个上限高达 Rank 50 的玩家等级系统。每级给的 Perk Points（天赋点）能直接决定英雄的初始生命、初始能量以及战斗加成。在低等级、没有完美天赋支撑的前提下，高难度下的怪物数值高得不讲道理。这种设计本质上是恶劣的“数值卡关”——它不是在考验你的牌效和策略，而是在逼你反复刷图攒经验。只有把账号等级硬生生肝上去，你的角色才算“配”通关。
+This game pushes the "in-run deckbuilding" and "turn-based combat" of Roguelites to an extreme level of tediousness, making its core loop suffocatingly heavy:
 
-《Across the Obelisk》空有一副“四人协作、策略构筑”的好皮囊，揭开面纱，内里却塞满了冗长的等待时间、折磨人的抗性计算以及逼人爆肝的局外数值。它不是让你在冒险中享受随机性的惊喜，而是用几十个状态栏和无尽的天赋点，把你变成了一个战战兢兢的“卡牌精算师”。
+Even before setting out, you must face incredibly tedious preparation: picking four heroes, racking your brain to allocate perk points, and tuning a massive starting deck. During map exploration, path choices are rife with high risks and opaque negative feedback.
+
+Once in turn-based card battles, its unique "speed chain" and "energy accumulation" mechanics drag the game's pacing to an incredibly sluggish crawl. Although each hero starts with only a base of 3 Energy and unused energy can carry over to the next turn, this design actually forces players into a highly rigid mindset: you cannot play cards freely; instead, you are forced to "hoard cards, pool energy, and unleash a single burst turn."
+
+The post-combat reinforcement phase is further plagued by agonizing randomness. Drafting, upgrading, removing cards, and acquiring gear are extremely luck-dependent. If fortune is not on your side and you fail to draw specific archetypes, your meticulously built four-person deck will quickly fall apart, failing to evolve into a so-called "specialized machine" and instead becoming a pile of clunky, self-obstructing dead weight.
+
+Rigid Archetypes: Monstrous Synergies Forced into a Tight Corner
+
+The biggest flaw of Across the Obelisk lies in its insistence that players simultaneously optimize four completely independent decks, which leads to severe strategic homogenization. Although the game divides heroes into five main archetypes:
+
+Warriors: Passive punching bags whose block mechanisms are overly simplistic;
+
+Scouts: Jacks-of-all-trades and masters of none, relegated to utility chores like applying poison and drawing cards;
+
+Mages: The only numerical glass cannons, heavily reliant on energy infusions;
+
+Healers: Pure babysitters, useless for anything other than healing and shielding;
+
+Multiclass: Gimmicky chimeras that frequently clog up hands due to excessively bloated card pools.
+
+This four-person party mechanic lacks any of the fluidity found in single-hero roguelike deckbuilders. The party's class synergy is locked tightly into a rigid formula: Warriors must use Taunt and Fortify every turn; Healers can only mechanically apply Regeneration and Sanctify; Mages mindlessly stack Burn or Spark; and Scouts repeat Mark and Poison. The moment one of these links collapses due to a bad draw, the entire party crumbles in a domino effect. This extreme interdependence completely strips the game of the satisfying rush of individual deckbuilding, leaving behind nothing but a prison-like, forced division of labor.
+
+Mechanical Bloat: A Combat Experience Akin to Solving Math Problems
+
+The game boasts in its promotional materials that it features over 500 cards, 300 items, and 16 heroes. However, this is a classic case of "quantity over quality." The massive card pool and item arsenal are cluttered with a plethora of irrelevant, garbage designs, severely diluting the core strategies.
+
+Combat is stuffed with an outrageous number of keywords. From resource-related terms like Inspire and Energize, to defensive ones like Block, Shield, and Fortify; to buffs like Bless, Powerful, Sharp, and Stealth; along with a mountain of damage-over-time effects (Bleed, Dark, etc.) and crowd control (Disarm, Silence, Paralyze, Slow/Haste). Rather than enhancing strategic depth, these convoluted terms only serve to make the UI look incredibly messy.
+
+What is even more unbearable is its incredibly hardcore—bordering on deliberately malicious—RPG damage calculation formulas. Every point of damage a player deals must undergo complex adjustments based on auras, curses, talents, and equipment buffs, subtract the enemy's block, and finally be multiplied by the target's resistance to that specific element. This design reduces card battles to mere mathematical computations in an Excel spreadsheet, rendering the gameplay entirely flavorless—like working on an unpaid financial statement.
+
+Forcing the Grind: "Stat Checking" in the Guise of a Roguelike
+
+The game's progression system is aggressively predatory. Despite fancy gimmicks like fusing two identical items into a Corrupted version, it cannot hide the heavily grind-intensive nature of its meta-progression.
+
+The out-of-run Perk (talent) system is the game's single worst design choice. Every long, painful defeat is rewarded only with a pittance of experience points to raise your Player Rank (up to level 50). Each level-up grants just one or two measly points to boost hero stats or starting energy. This completely exposes the game's true nature as a "pseudo-roguelike"—at low ranks, because your base stats are too low, it is practically impossible to beat the game. When you finally do clear a run, it is not because your skills have improved, but because you spent dozens of hours mindlessly grinding your rank. This design, which uses meta-progression stats to completely override run-specific strategy, is a total betrayal of the roguelike spirit.
+
+Monotonous Gameplay: Three Game Modes with Different Skins but the Same Bones
+
+Although the game offers three game modes, they fail to rescue its dull core:
+
+Adventure Mode: An agonizingly long, grindy mode that forcibly ties hero unlocks and talent progression to itself, forcing players who couldn't care less about the story to repeatedly endure the bloated campaign.
+
+Obelisk Challenge: Although it highlights a random draft-style building system, it thoroughly exposes the game's atrocious card balance. Lacking the support of out-of-run Perks, players can easily be shut down by regular enemies on the very first floor just because they failed to draft a specific counter card.
+
+Weekly Challenge: Tackling preset stages with rigid, developer-restricted setups. It offers absolutely no joy of exploration and instead feels like a tedious, formulaic puzzle-solving exam.
+
+Conclusion
+
+Across the Obelisk is a bloated title suffering from overambition and a lack of polish. It tries to be clever by introducing "four-deck synergy," only to end up creating an incredibly tedious micro-management hell. It piles on countless cards and keywords, but reduces combat to dry numerical calculations. In this game, it is hard to find the pure joy of roguelike deckbuilders—the thrill of adapting on the fly and snatching victory from the jaws of defeat. Instead, it is replaced by endless memorization, a grind-heavy meta-progression system, and heavy stat-based punishments. It is a tedious chore suitable only for a tiny minority of "numerical masochists," rather than an artistic masterpiece that anyone can easily enjoy.

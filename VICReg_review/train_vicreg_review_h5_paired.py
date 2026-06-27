@@ -403,7 +403,7 @@ def parse_args():
     parser.add_argument("--sample-fraction", type=float, default=0.6)
     parser.add_argument("--train-game-count", type=int, default=0)
     parser.add_argument("--train-game-seed", type=int, default=20260626)
-    parser.add_argument("--train-game-anchor-appids", default="1086940,1091500,1385380")
+    parser.add_argument("--train-game-anchor-appids", default="1091500,1385380")
     parser.add_argument("--cache-mode", choices=["queue", "full"], default="queue")
     parser.add_argument("--prefetch-batches", type=int, default=2)
     parser.add_argument("--cache-dtype", choices=["float16", "float32"], default="float16")

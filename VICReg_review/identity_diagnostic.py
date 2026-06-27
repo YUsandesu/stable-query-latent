@@ -3,9 +3,9 @@
 This is the targeted check for the low-rank collapse failure mode:
 
 * Participation Ratio (effective dimension) of game vectors.
-* Text-to-game identity retrieval ranks for Baldur's Gate 3, Cyberpunk 2077,
-  and the existing Across the Obelisk sentiment variants.
-* Pairwise same-game cosine under neutral/positive/negative rewrites.
+* Text-to-game identity retrieval ranks for the existing Cyberpunk 2077 and
+  Across the Obelisk sentiment/name-erased variants.
+* Pairwise same-game cosine under neutral/positive/negative/noname rewrites.
 
 The VICReg game vector used here is the downstream compact centroid:
 encoder(view).mean(latent_slots). Multiple sampled views are averaged, matching
@@ -44,14 +44,14 @@ DEFAULT_ENCODER = SCRIPT_DIR / "heads" / "vicreg_review_h5_best.pt"
 DEFAULT_CACHE_DIR = SCRIPT_DIR / "tags"
 
 DEFAULT_CASES = [
-    ("Baldur's Gate 3", "1086940", "description", SCRIPT_DIR / "tags" / "game_descriptions" / "1086940.txt"),
-    ("Cyberpunk 2077", "1091500", "description", SCRIPT_DIR / "tags" / "game_descriptions" / "1091500.txt"),
     ("Cyberpunk 2077", "1091500", "neutral", ROOT / "2077_text.txt"),
     ("Cyberpunk 2077", "1091500", "positive", ROOT / "2077_text_postive.txt"),
     ("Cyberpunk 2077", "1091500", "negative", ROOT / "2077_text_negative.txt"),
+    ("Cyberpunk 2077", "1091500", "noname", ROOT / "2077_noname.txt"),
     ("Across the Obelisk", "1385380", "neutral", ROOT / "AO_text.txt"),
     ("Across the Obelisk", "1385380", "positive", ROOT / "AO_text_postive.txt"),
     ("Across the Obelisk", "1385380", "negative", ROOT / "AO_text_negative.txt"),
+    ("Across the Obelisk", "1385380", "noname", ROOT / "AO_text_noname.txt"),
 ]
 
 
@@ -331,11 +331,11 @@ def render_report(payload: dict, args) -> str:
     rows = payload["retrieval_rows"]
     pairs = payload["pair_rows"]
     pr = metrics["vicreg_centroid"]["centered_pr"]
-    bg3 = [row for row in rows if row["target_appid"] == "1086940"]
-    cyber = [row for row in rows if row["target_appid"] == "1091500"]
-    bg3_best = min((row["vicreg_rank"] for row in bg3), default=None)
-    cyber_best = min((row["vicreg_rank"] for row in cyber), default=None)
-    success = pr >= 15 and (bg3_best is None or bg3_best <= 100) and (cyber_best is None or cyber_best <= 100)
+    best_rank_by_game = {}
+    for row in rows:
+        key = (row["target_appid"], row["game"])
+        best_rank_by_game[key] = min(best_rank_by_game.get(key, row["vicreg_rank"]), row["vicreg_rank"])
+    success = pr >= 15 and all(rank <= 100 for rank in best_rank_by_game.values())
 
     lines = [
         "# VICReg 情感过滤与游戏身份保持实验",
@@ -407,7 +407,7 @@ def render_report(payload: dict, args) -> str:
 
     lines.extend([
         "",
-        "## 同游戏不同情绪文本相似度",
+        "## 同游戏不同变体文本相似度",
         "",
         "| 游戏 | 文本对 | raw cosine | VICReg centroid cosine |",
         "|---|---|---:|---:|",

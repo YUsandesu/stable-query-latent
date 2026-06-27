@@ -1,70 +1,85 @@
-《赛博朋克 2077》（Cyberpunk 2077）是一款将第一人称射击（FPS）与深度的角色扮演（RPG）相结合的开放世界游戏。以下为你整理的核心游戏机制、玩法流派以及主干故事脉络：
+Cyberpunk 2077: Core Game Mechanics, Playstyles, and Main Story Arc
 
-一、 游戏核心机制与玩法
-夜之城的生存法则完全取决于你如何改造自己的身体和装备。游戏在 2.0 版本及往后进行了彻底的重构，使其战斗和成长系统变得极具深度。
+Cyberpunk 2077 is an open-world game that combines first-person shooter (FPS) mechanics with deep role-playing game (RPG) elements. Below is a breakdown of the core game mechanics, playstyles, and main story arc:
 
-1. 角色属性与成长
-游戏开始时你可以选择三种出身（Lifepath）：流浪者、街头小子或公司员工。这主要影响你的序章剧情以及后续对话中的特殊选项。
-核心属性分为五大维度，决定了你的技能树走向：
+I. Core Game Mechanics and Gameplay
 
-肉体 (Body)： 提升生命值、近战伤害，解锁霰弹枪、机枪和徒手搏击技巧。
+Survival in Night City depends entirely on how you modify your body and equipment. The game was completely overhauled in Update 2.0 and beyond, bringing immense depth to its combat and progression systems.
 
-反应 (Reflexes)： 提升暴击率与机动性，解锁突击步枪、冲锋枪以及极具观赏性的武士刀动作。
+1. Character Attributes and Progression
 
-技术能力 (Technical Ability)： 决定护甲值，增强对手雷、药剂的利用率，是解锁高级装备制作和强化义体容量的关键。
+At the start of the game, you can choose from three Lifepaths: Nomad, Street Kid, or Corpo. This primarily affects your prologue storyline and unlocks unique dialogue options throughout the game.
 
-智力 (Intelligence)： 传统意义上的“法师”属性，决定黑客网络攻防能力和快速破解伤害。
+The core attributes are divided into five dimensions, which determine the direction of your skill trees:
 
-镇定 (Cool)： 主打潜行、暗杀、暴击伤害以及狙击枪、手枪等精准武器的加成。
+Body: Increases health and melee damage, and unlocks skills for shotguns, machine guns, and blunt force/unarmed combat.
 
-2. 义体系统 (Cyberware)
-这是《赛博朋克 2077》的灵魂机制。玩家需要通过义体医生（Ripperdoc）在身体的各个部位植入科技部件：
+Reflexes: Increases critical hit chance and mobility, while unlocking skills for assault rifles, submachine guns (SMGs), and highly stylish katana maneuvers.
 
-操作系统： 可以选择装载网络接入舱（走黑客流），或者牺牲黑客能力换取斯安威斯坦（时停触发器）或狂暴组件（近战免伤无敌）。
+Technical Ability: Determines armor value, enhances the effectiveness of grenades and health items, and is key to unlocking advanced crafting and increasing Cyberware capacity.
 
-表皮与双腿： 植入二段跳（强化肌腱）大幅提升纵向探索能力，或加装光学迷彩实现短暂隐身。
+Intelligence: The traditional "mage" attribute, which determines netrunning (hacking) capabilities, offensive/defensive network options, and Quickhack damage.
 
-手臂武器： 螳螂刀（高频斩击）、大猩猩手臂（强力钝击/破门）、单分子线（中程切开敌人）或射弹发射系统（手臂微型导弹）。
+Cool: Focuses on stealth, assassination, critical damage, and bonuses for precision weapons like sniper rifles and pistols.
 
-3. 三大枪械流派
-游戏中的远程度武器分为三大类，各有独特的战斗机制：
+2. Cyberware System
 
-动能武器 (Power)： 传统的子弹武器，弹药可以在硬质表面上反弹，用来击中躲在掩体后的敌人。
+This is the soul of Cyberpunk 2077's mechanics. Players must visit a Ripperdoc to implant high-tech components into various parts of their body:
 
-技术武器 (Tech)： 需要蓄力发射，子弹拥有极强的穿透力，可以直接穿透墙壁和掩体狙杀敌人。
+Operating System: You can choose to equip a Cyberdeck (for a netrunner playstyle) or sacrifice hacking abilities in exchange for a Sandevistan (time-slowing trigger) or a Berserk operating system (melee invulnerability and damage reduction).
 
-智能武器 (Smart)： 弹药具备自动寻向功能，配合手部植入体，子弹可以拐弯追踪视野内的目标。
+Integumentary System & Legs: Implanting double-jump (Reinforced Tendons) vastly improves vertical exploration, or installing Optical Camo grants temporary invisibility.
 
-二、 主干故事脉络
-《赛博朋克 2077》讲述的是一个关于“生存、宿命与代价”的故事。
+Arms: Mantis Blades (high-frequency slicing), Gorilla Arms (powerful blunt attacks and forcing doors open), Monowire (mid-range slicing), or Projectile Launch System (arm-mounted micro-missiles).
 
-1. 致命的偷盗（序章）
-主角 V（Vincent / Valerie）是夜之城底层的一个底层雇佣兵。为了在夜之城出人头地，V 与好兄弟杰克·威尔斯接下了一个高风险的惊天大单：潜入垄断巨头荒坂公司（Arasaka）的顶级酒店，偷取一枚处于实验阶段的神秘芯片——Relic。
-不巧的是，两人撞破了荒坂帝国的家庭弑父惨剧：大少爷荒坂赖宣亲手掐死了统治者荒坂三郎，并嫁祸给刺客。V 和杰克在逃跑途中遭遇围剿，杰克重伤身亡。为了防止保护芯片的容器泄露导致数据损坏，V 被迫将 Relic 芯片插进了自己的大脑。随后，中间人德克斯特为了自保，在小旅馆里对准 V 的脑袋开枪“爆头”并弃尸荒木荒野。
+3. The Three Ranged Weapon Archetypes
 
-2. 灵魂的共生与挣扎（发展）
-出乎意料的是，Relic 芯片在 V 脑死后自动启动，利用纳米科技修复了 V 的大脑损伤，救了 V 一命。但代价是残酷的：芯片里储存着 50 年前炸毁荒坂塔的“传奇摇滚小子/恐怖分子”——强尼·银手（Johnny Silverhand）的数字人格意识（Engram）。
-芯片一旦启动就无法逆转，强尼的意识开始像晚期癌症一样蚕食、覆盖 V 的自身记忆。义体医生维克托告诉 V，他的肉体只剩下几个周的生命，最终他将被强尼完全取代。
-为了活命，V 开始在夜之城的各方势力中奔走，寻找剥离芯片的方法：
+Ranged weapons in the game are divided into three main categories, each with its own unique combat mechanics:
 
-他绑架了芯片的开发者荒坂赫尔曼。
+Power Weapons: Traditional ballistic weapons. Their bullets can ricochet off hard surfaces to strike enemies hiding behind cover.
 
-他通过巫师帮试图联系墙外的顶级 AI 奥特·坎宁安（强尼的前女友）。
+Tech Weapons: Require charging before firing. Their rounds have incredible penetrative power, allowing players to snipe enemies directly through walls and cover.
 
-在此期间，V 结识了流浪者帕南、警探瑞弗、酒吧女孩朱迪等盟友，也逐渐了解了强尼·银手狂妄反叛背后的故事。V 和脑海中的强尼从一开始的肉体争夺、互相咒骂，逐渐走向了感同身受的奇妙共生。
+Smart Weapons: Utilize self-homing ammunition. Paired with hand implants, the bullets can curve around obstacles to track targets within your field of view.
 
-3. 荒坂塔的抉择（终局）
-当 V 的身体濒临崩溃时，所有的线索都指向了最后的唯一解：杀入荒坂塔的核心服务器“神舆”（荒坂公司用来囚禁和解析人类灵魂的数字监狱），利用那里的顶级设备分离两人的意识。
-根据玩家在游戏过程中的支线选择和亲密度，V 在最后会面临不同的盟友抉择：
+II. Main Story Arc
 
-孤注一掷： 带着流浪者阿德卡多家族杀出一条血路（星星结局）。
+Cyberpunk 2077 tells a story about "survival, destiny, and the price of success."
 
-退让妥协： 相信荒坂华子，与荒坂公司做一笔出卖灵魂的交易（恶魔结局）。
+1. The Deadly Heist (Prologue)
 
-老友同行： 把身体控制权交给强尼，让强尼带上老搭档罗格再闹一次荒坂塔（太阳/节制结局）。
+The protagonist V (Vincent or Valerie) is a mercenary on the lowest rungs of Night City's underworld. Seeking to make a name for themselves, V and their close friend Jackie Welles take on a high-stakes, legendary heist: infiltrating the high-end hotel owned by the mega-conglomerate Arasaka to steal a mysterious, experimental biochip—the Relic.
 
-以眼还眼（隐藏结局）： 不连累任何朋友，独自一人一枪，正面硬刚整座荒坂塔。
+By terrible coincidence, the duo witnesses a patricidal tragedy within the Arasaka empire: Yorinobu Arasaka, the eldest son, strangles the ruler Saburo Arasaka to death with his own hands, pinning the blame on assassins. V and Jackie are hunted as they flee, and Jackie dies of his severe wounds. To prevent data corruption from a failing containment suit, V is forced to slot the Relic into their own neural socket. Afterward, the fixer Dexter DeShawn, seeking self-preservation, shoots V in the head at a motel and dumps the body in a junkyard.
 
-在“神舆”的数字空间里，V 最终会见到了奥特 AI，但命运却开了一个赛博朋克式的玩笑：因为肉体已经被破坏得太深，即使强尼的意识被剥离，V 的肉体也只剩下半年的寿命，而如果把肉体彻底留给强尼，强尼则可以健康地活下去。
+2. Symbiosis and Struggle of the Soul (Development)
 
-将身体留给强尼，自己化为赛博空间的一缕数据流；还是回到只剩半年寿命的肉体中，回夜之城当一个短暂闪耀的传奇，或是和爱人远走高飞——这个最终的抉择，全在玩家手中。
+Against all odds, the Relic activates after V's brain death, using nanotechnology to repair V's brain damage and saving their life. But the cost is brutal: stored on the chip is the digital consciousness (Engram) of Johnny Silverhand, the legendary rockerboy and terrorist who blew up Arasaka Tower 50 years ago.
+
+Once initiated, the process is irreversible. Johnny's consciousness begins to eat away at V's mind like terminal cancer, overwriting V's own memories. The Ripperdoc Viktor tells V that their body has only a few weeks of life remaining, after which they will be completely overwritten by Johnny.
+
+To survive, V scrambles across Night City's various factions, seeking a way to extract the chip:
+
+They kidnap Anders Hellman, the creator of the Relic.
+
+They try to contact Alt Cunningham (Johnny's former girlfriend), a legendary AI beyond the Blackwall, through the Voodoo Boys.
+
+During this journey, V builds alliances with people like the Nomad Panam, Detective River, and braindance technician Judy, while slowly uncovering the truth behind Johnny Silverhand's arrogant rebellion. From their initial violent struggle for control and mutual hostility, V and Johnny gradually transition into an empathetic, extraordinary symbiosis.
+
+3. Decisions at Arasaka Tower (Endgame)
+
+As V's body nears total collapse, all leads point to a single final solution: storming the heart of Arasaka Tower to reach Mikoshi—Arasaka's digital fortress used to imprison and analyze human souls—and utilizing its advanced systems to separate their minds.
+
+Depending on the player's side-quest decisions and affinity rating, V will face different choices regarding their allies in the end:
+
+A Desperate Gamble: Fight your way through with the Aldecaldos nomad family (The Star Ending).
+
+Compromise and Surrender: Trust Hanako Arasaka, making a soul-selling deal with the Arasaka Corporation (The Devil Ending).
+
+Going with an Old Friend: Hand body control to Johnny, letting him and his old partner Rogue storm Arasaka Tower once more (The Sun / Temperance Ending).
+
+An Eye for an Eye (Hidden Ending): Drag no friends down with you, going in completely alone with just a gun to storm Arasaka Tower head-on (Don't Fear The Reaper).
+
+In the digital realm of Mikoshi, V finally meets Alt Cunningham, but fate plays a classic cyberpunk trick: because V's physical body has suffered too much structural damage, even if Johnny's consciousness is successfully extracted, V will only have six months left to live. However, if the body is surrendered to Johnny completely, Johnny can live a full, healthy life.
+
+Leave your body to Johnny while you become a mere stream of data in cyberspace, or return to a physical form that has only six months left to live—whether to go out in a brief blaze of glory as a legend of Night City, or run away with those you love. This ultimate choice rests entirely in the player's hands.

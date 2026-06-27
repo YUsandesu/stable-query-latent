@@ -1,0 +1,84 @@
+Core Game Mechanics, Playstyles, and Main Story Arc
+
+This open-world game combines first-person shooter (FPS) mechanics with deep role-playing game (RPG) elements. Below is a breakdown of the core game mechanics, playstyles, and main story arc:
+
+I. Core Game Mechanics and Gameplay
+
+Survival in this futuristic metropolis depends entirely on how you modify your body and equipment. The game was completely overhauled in a major systems update, bringing immense depth to its combat and progression systems.
+
+1. Character Attributes and Progression
+
+At the start of the game, you can choose from three Lifepaths: Nomad, Street Kid, or Corporate. This primarily affects your prologue storyline and unlocks unique dialogue options throughout the game.
+The core attributes are divided into five dimensions, which determine the direction of your skill trees:
+
+Body: Increases health and melee damage, and unlocks skills for shotguns, machine guns, and blunt force/unarmed combat.
+
+Reflexes: Increases critical hit chance and mobility, while unlocking skills for assault rifles, submachine guns (SMGs), and highly stylish katana maneuvers.
+
+Technical Ability: Determines armor value, enhances the effectiveness of grenades and health items, and is key to unlocking advanced crafting and increasing Cyberware capacity.
+
+Intelligence: The traditional "mage" attribute, which determines hacking capabilities, offensive/defensive network options, and offensive program damage.
+
+Cool: Focuses on stealth, assassination, critical damage, and bonuses for precision weapons like sniper rifles and pistols.
+
+2. Cyberware System
+
+This is the soul of the game's mechanics. Players must visit a local implant specialist to integrate high-tech components into various parts of their body:
+
+Operating System: You can choose to equip a standard network deck (for a hacker playstyle) or sacrifice hacking abilities in exchange for a time-slowing trigger or a berserk operating system (melee invulnerability and damage reduction).
+
+Integumentary System & Legs: Implanting double-jump capabilities vastly improves vertical exploration, or installing active camouflage grants temporary invisibility.
+
+Arms: Retractable arm blades (high-frequency slicing), reinforced metallic fists (powerful blunt attacks and forcing doors open), monofilament whips (mid-range slicing), or an arm-mounted micro-missile launcher.
+
+3. The Three Ranged Weapon Archetypes
+
+Ranged weapons in the game are divided into three main categories, each with its own unique combat mechanics:
+
+Power Weapons: Traditional ballistic weapons. Their bullets can ricochet off hard surfaces to strike enemies hiding behind cover.
+
+Tech Weapons: Require charging before firing. Their rounds have incredible penetrative power, allowing players to snipe enemies directly through walls and cover.
+
+Smart Weapons: Utilize self-homing ammunition. Paired with hand implants, the bullets can curve around obstacles to track targets within your field of view.
+
+II. Main Story Arc
+
+The game tells a story about "survival, destiny, and the price of success."
+
+1. The Deadly Heist (Prologue)
+
+The protagonist is a mercenary on the lowest rungs of the metropolis's underworld. Seeking to make a name for themselves, the protagonist and their close friend and partner take on a high-stakes, legendary heist: infiltrating a high-end luxury hotel owned by a mega-conglomerate to steal a mysterious, experimental biochip—an advanced neural consciousness carrier.
+
+By terrible coincidence, the duo witnesses a patricidal tragedy within the corporate empire: the eldest son of the family dynasty strangles his own father, the supreme ruler of the corporation, to death with his own hands, pinning the blame on assassins. The protagonist and their partner are hunted as they flee, and the partner dies of severe wounds. To prevent data corruption from a failing containment suit, the protagonist is forced to slot the volatile biochip into their own neural socket. Afterward, their fixer, seeking self-preservation, shoots the protagonist in the head at a motel and dumps the body in a junkyard.
+
+2. Symbiosis and Struggle of the Soul (Development)
+
+Against all odds, the biochip activates after the protagonist's clinical brain death, using nanotechnology to repair the damaged neural tissue and saving their life. But the cost is brutal: stored on the chip is the digital consciousness (Engram) of a legendary rebel and rockerboy who blew up the corporation's headquarters 50 years ago.
+
+Once initiated, the process is irreversible. This digital consciousness begins to eat away at the protagonist's mind like terminal cancer, overwriting their own memories. A friendly neighborhood doctor reveals that the protagonist's body has only a few weeks of life remaining, after which they will be completely overwritten by the guest mind.
+
+To survive, the protagonist scrambles across the city's various factions, seeking a way to safely extract the chip:
+
+They kidnap the lead engineer who designed the biochip.
+
+They try to contact a legendary rogue artificial intelligence existing beyond the network's dangerous firewall, utilizing the help of a local hacker gang.
+
+During this journey, the protagonist builds deep alliances with people like a reliable nomad driver, a determined police detective, and a brilliant sensory-editor, while slowly uncovering the truth behind the guest mind's historical rebellion. From their initial violent struggle for control and mutual hostility, the two minds gradually transition into an empathetic, extraordinary symbiosis.
+
+3. Decisions at the Corporate HQ (Endgame)
+
+As the protagonist's physical body nears total collapse, all leads point to a single final solution: storming the heart of the corporate headquarters to reach their digital fortress—the corporation's main database used to imprison and analyze human souls—and utilizing its advanced systems to separate the two minds.
+
+Depending on the player's side-quest decisions and alliance choices, the protagonist will face different paths regarding their allies in the end:
+
+A Desperate Gamble: Fight your way through with a loyal nomad family.
+
+Compromise and Surrender: Trust the daughter of the corporate dynasty, making a soul-selling deal with the very corporation that caused this tragedy.
+
+Going with an Old Friend: Hand physical control to the guest mind, letting them and their old partner storm the corporate headquarters once more.
+
+An Eye for an Eye (Hidden Option): Drag no friends down with you, going in completely alone with just a gun to storm the corporate tower head-on.
+
+In the depths of the corporate database, the protagonist finally meets the rogue AI, but fate plays a classic cyberpunk trick: because the physical body has suffered too much structural damage, even if the guest consciousness is successfully extracted, the protagonist will only have six months left to live. However, if the body is surrendered to the guest mind completely, they can live a full, healthy life.
+
+Leave your body to the digital guest while you become a mere stream of data in cyberspace, or return to a physical form that has only six months left to live—whether to go out in a brief blaze of glory as a legend of the city, or run away with those you love. This ultimate choice rests entirely in the player's hands.

@@ -1,0 +1,81 @@
+The game is a "four-hero squad" cooperative roguelite deckbuilding RPG: each character has their own independent deck, and players make event choices on branching maps, fight turn-based card battles, draft/remove/upgrade cards, and equip items, ultimately progressing through a four-act adventure. The developers refer to it as a co-op roguelite deckbuilder, supporting single-player control of four heroes as well as 2-4 player online co-op.
+
+Story Background
+
+The main setting is a fantasy Kingdom. The game opens on the princess's 16th birthday: she was supposed to be introduced to the Wizard Academy, but her room suddenly exploded, sending a wave of energy sweeping across the kingdom; subsequently, both the princess and the king's advisor, the court mage, vanished. The royal guards searched the castle to no avail, and the soldiers sent out did not return. All they knew was that the tracks vanished deep in the Old Forest, near an ancient central pillar that had slept for hundreds of years. The king thus issued a bounty, calling on adventurers to find the princess. This is how the Lore page of the community Wiki describes the prologue. (game-wiki.fandom.com)
+
+The official store page states the main objective more directly: rescue the king's daughter from the traitorous court mage, or she might die; the fate of your party and the fate of the Kingdom depend on this journey. (game-store-page.com) Thus, its story skeleton is the classic fantasy "save the princess / save the kingdom," but the true content comes from the massive number of events, character questlines, hidden nodes, optional choices on the routes, and the worldbuilding gradually pieced together through repeated runs.
+
+Map and Chapter Structure
+
+The game usually starts from the starting kingdom. The Act 1 map has nodes such as farmlands, forests, bandit camps, ancient trees, and a central pillar; the Wiki's starting map page lists a vast array of nodes, including Town, Caravan, Bandit Camp, Old Tree, Central Pillar, etc. (game-wiki.fandom.com)
+
+Upon reaching the Central Pillar, the pillar opens multiple portals. Portals recorded by the Wiki include a volcanic zone (volcano/hot zone), a swamp region (swamp), a frozen forest (icy forest), a breezy sea area, a desert area, etc. (game-wiki.fandom.com) The official publisher page also mentions that Adventure Mode spans four acts, each with a boss and procedurally generated events. (publisher-page.com)
+
+The narrative is not a long, linear plot like in classic JRPGs, but rather resembles a tabletop RPG campaign: each node provides a scene description and several choices, which may trigger combat, award key items, unlock characters/pets/routes, or alter the outcomes of subsequent events. The developers emphasize that "the path you take, who you save, who you leave behind, and whether you help others or loot their treasures" will all affect your journey. (game-store-page.com)
+
+Core Gameplay Loop
+
+Form a four-hero squad: A run typically consists of four heroes. In single-player, you control all four; in multiplayer, characters can be distributed among 2-4 players. The official console developer article explains it as: each character has their own independent deck, and the four-person squad moves together along branching maps, handling choices, side quests, and key items. (console-news.com)
+
+Pre-departure deckbuilding: Choose heroes, assign perks, and prepare the starting deck. The official store page notes that players can customize and upgrade decks through XP and perk points. (game-store-page.com)
+
+Navigate map nodes: Nodes can be combat encounters, events, shops, camps, treasure chests, character unlocks, hidden routes, or bosses. Route choices impact resources, risks, rewards, story, and accessible areas.
+
+Fight turn-based card battles: During combat, each hero acts according to their speed, using their own hand and energy. The Wiki Glossary specifies: Energy is used to play cards, with a baseline of 3 energy gained per turn, and unspent energy can carry over to the next turn. (game-wiki.fandom.com)
+
+Post-battle upgrading: Draft new cards, upgrade cards, remove cards, obtain gear, and gain gold/shards/XP, gradually refining each character's deck from "functional" into a "specialized machine."
+
+Classes and Team Roles
+
+The Characters page on the Wiki divides roles into five categories:
+
+Warriors: Main defensive role, specializing in physical damage and block.
+
+Scouts: Utility/jack-of-all-trades, capable of dealing damage, applying poison, drawing cards, and supporting.
+
+Mages: Main offensive role, specializing in elemental damage and energy-related abilities.
+
+Healers: Main supportive role, specializing in healing, shields, and mystical damage.
+
+Multiclass: Hybrid classes that use a combined card pool of two professions. (game-wiki.fandom.com)
+
+This is also the biggest difference between it and many single-character roguelite deckbuilders: you are not just optimizing a single deck, but simultaneously optimizing the synergy among four distinct decks. For example, the Warrior takes charge of Taunt/Block/Fortify, the Mage stacks Burn/Spark/Dark, the Healer manages Regeneration/Bless/Sanctify, and the Scout handles Mark/Poison/card draw/speed control.
+
+Card and Combat Mechanisms
+
+Cards broadly cover functions such as attacking, defending, healing, drawing, buffing, debuffing, speed control, deck manipulation, and energy cycling. The developers state that the base game features 500+ cards, 300+ items, 16 heroes, and four base classes. (game-store-page.com)
+
+There are numerous combat keywords, which can be categorized into several core types:
+
+Resource: Energy to play cards, Inspire to draw extra cards, and Energize to gain bonus energy next turn.
+
+Defense: Block to absorb damage, Shield to grant block next turn, Fortify to prevent block from decaying at the end of the turn, and Taunt to redirect enemy targeting.
+
+Buff: Bless to increase damage and healing received, Powerful to increase damage/healing by a percentage, Sharp to enhance slashing/piercing damage, and Stealth to increase damage/healing while preventing direct targeting.
+
+Damage over Time (DoT) / Vulnerability: Bleed, Burn, Poison, Dark, Spark, etc.
+
+Control: Disarm to disable attack cards, Silence to disable spell cards, Paralyze to skip a turn, and Slow/Fast/Haste/Daze for speed control.
+
+Deck Manipulation: Discover to randomly present cards from the class pool, Vanish to remove a card from the current battle after use, and Discard to discard cards from hand. (game-wiki.fandom.com) (game-wiki.fandom.com)
+
+Damage calculation is also highly RPG-like: base damage is modified by auras, curses, perks, gear, and active effects, then absorbed by the target's block, and finally subjected to the target's resistance against that specific damage type. (game-wiki.fandom.com) This makes it place a heavier emphasis on stacking and stripping resistances compared to standard "what you see is what you deal" card games.
+
+Equipment, Perks, and Meta-Progression
+
+Equipment alters a character's combat capabilities, such as increasing specific damage types, enhancing aura/curse stacking, or granting on-play effects. The Wiki also mentions that equipping a hero with two identical items will transform them into a corrupted version. (game-wiki.fandom.com)
+
+Perks serve as the meta-progression system. As described on the Wiki's Perks page, finishing a run awards experience that increases your player rank, up to a maximum of Rank 50. Each rank awards 1 perk point per character, which can be allocated before starting a run and reset for free. Perks provide minor boosts such as health, starting resources, starting energy, and combat bonuses. (game-wiki.fandom.com)
+
+Thus, it is a clear-cut roguelite: while routes, events, rewards, and builds vary from run to run, meta-unlocks and perks will progressively strengthen your account and hero pool.
+
+Game Modes
+
+There are three main modes:
+
+Adventure Mode: The story mode, playable solo or with up to 4 players in co-op. Progression and meta-unlocks are primarily tied to this mode. The Wiki describes it as the core mode with a story and meta-progression. (game-wiki.fandom.com)
+
+Nexus Challenge / Nexus Mode: A more traditional roguelike challenge featuring higher randomness, where players draft their starting decks and encounter more randomized map events. The developers describe this mode as a randomized adventure where you "draft unique decks." (publisher-page.com)
+
+Weekly Challenge: A weekly challenge featuring preset heroes, decks, maps, and rules, which focuses more on competing for skill and score rankings. (game-wiki.fandom.com)

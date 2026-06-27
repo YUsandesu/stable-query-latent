@@ -95,9 +95,8 @@ Headline diagnostics:
 |---|---:|
 | compact centroid Participation Ratio | 26.67 |
 | z-scored compact centroid PR | 26.64 |
-| Baldur's Gate 3 description rank | 1 / 293 |
-| Cyberpunk 2077 description / neutral / positive / negative ranks | 1 / 1 / 1 / 1 |
-| Across the Obelisk neutral / positive / negative ranks | 1 / 1 / 1 |
+| Cyberpunk 2077 neutral / positive / negative / noname ranks | 1 / 1 / 1 / TBD |
+| Across the Obelisk neutral / positive / negative / noname ranks | 1 / 1 / 1 / TBD |
 | TAP tag micro-F1, flatten pool | 0.6938 |
 | content retention vs raw | 0.888 |
 | sentiment R² retention vs raw | 0.349 |
