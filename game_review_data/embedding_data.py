@@ -38,6 +38,53 @@ def flatten_positions(nested):
     return [(rid, skey) for rid, sentences in nested.items() for skey in sentences]
 
 
+def _numeric_suffix(value, prefix):
+    text = str(value)
+    if text.startswith(prefix):
+        text = text[len(prefix):]
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def ordered_review_texts(nested):
+    """Flatten a sentences mapping into (texts, review_lengths) in a stable order.
+
+    Reviews are sorted by numeric id, sentences by their ``sentence_<n>`` suffix —
+    matching the order the trainer / H5 builder reconstruct, so the npz layout is
+    deterministic. ``review_lengths`` lets us split the flat embedding output back
+    into per-review groups for save_game_npz.
+    """
+    texts = []
+    review_lengths = []
+    for _, sentence_map in sorted(nested.items(), key=lambda kv: _numeric_suffix(kv[0], "")):
+        if not isinstance(sentence_map, dict):
+            continue
+        count = 0
+        for _, payload in sorted(
+            sentence_map.items(), key=lambda kv: _numeric_suffix(kv[0], "sentence_")
+        ):
+            text = payload.get("sentence_text") if isinstance(payload, dict) else None
+            if text is None:
+                continue
+            texts.append(text)
+            count += 1
+        if count:
+            review_lengths.append(count)
+    return texts, review_lengths
+
+
+def split_into_reviews(vectors, review_lengths):
+    """Split a flat list of sentence vectors back into per-review groups."""
+    reviews = []
+    cursor = 0
+    for length in review_lengths:
+        reviews.append(vectors[cursor : cursor + length])
+        cursor += length
+    return reviews
+
+
 # --------------------------------------------------------------------------- local
 class LocalEmbedder:
     """Local Qwen3-Embedding via transformers with last-token pooling."""
@@ -130,10 +177,16 @@ class CloudEmbedder:
         self.executor.shutdown(wait=True)
 
 
-def embed_data(input_dir, output_dir, backend, overwrite=False, **kwargs):
+def embed_data(input_dir, output_dir, backend, overwrite=False, output_format="npz", **kwargs):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if output_format not in ("npz", "json"):
+        raise ValueError(f"output_format must be 'npz' or 'json', got {output_format!r}")
+    out_suffix = ".npz" if output_format == "npz" else ".json"
+    if output_format == "npz":
+        sys.path.insert(0, str(_PROJECT_ROOT))
+        from game_npz import save_game_npz
 
     input_files = sorted(input_dir.glob("*.json"))
     if not input_files:
@@ -157,27 +210,44 @@ def embed_data(input_dir, output_dir, backend, overwrite=False, **kwargs):
         )
         closer = embedder.close
 
-    print(f"embed_data: {len(input_files)} files, backend={backend} -> {output_dir}")
+    print(f"embed_data: {len(input_files)} files, backend={backend} format={output_format} -> {output_dir}")
     try:
         for file_index, input_path in enumerate(input_files, start=1):
-            output_path = output_dir / input_path.name
+            output_path = (output_dir / input_path.name).with_suffix(out_suffix)
             if output_path.exists() and not overwrite:
                 print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (exists)")
                 continue
 
             with input_path.open("r", encoding="utf-8") as file:
                 nested = json.load(file)
+
+            if output_format == "npz":
+                texts, review_lengths = ordered_review_texts(nested)
+                if not texts:
+                    save_game_npz(output_path, [])
+                    continue
+                started = time.time()
+                vectors = embedder.embed(texts)
+                reviews = split_into_reviews(vectors, review_lengths)
+                save_game_npz(output_path, reviews)
+                dim = len(vectors[0]) if vectors else 0
+                print(
+                    f"[{file_index}/{len(input_files)}] {input_path.name}: "
+                    f"{len(texts)} sentences, {len(review_lengths)} reviews, dim {dim} "
+                    f"in {time.time() - started:.1f}s -> {output_path.name}"
+                )
+                continue
+
+            # output_format == "json": keep the nested {rid:{skey:{text,vector}}} layout.
             positions = flatten_positions(nested)
             if not positions:
                 output_path.write_text("{}", encoding="utf-8")
                 continue
-
             texts = [nested[rid][skey]["sentence_text"] for rid, skey in positions]
             started = time.time()
             vectors = embedder.embed(texts)
             for (rid, skey), vector in zip(positions, vectors):
                 nested[rid][skey]["vector"] = vector
-
             tmp_path = output_path.with_suffix(".json.tmp")
             try:
                 with tmp_path.open("w", encoding="utf-8") as file:
@@ -186,7 +256,6 @@ def embed_data(input_dir, output_dir, backend, overwrite=False, **kwargs):
             except BaseException:
                 tmp_path.unlink(missing_ok=True)
                 raise
-
             dim = len(vectors[0]) if vectors else 0
             print(
                 f"[{file_index}/{len(input_files)}] {input_path.name}: "
@@ -195,13 +264,16 @@ def embed_data(input_dir, output_dir, backend, overwrite=False, **kwargs):
     finally:
         if closer:
             closer()
-    print(f"Done. Embedded JSON written to {output_dir}")
+    print(f"Done. Embedded {output_format} written to {output_dir}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", default=DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-format", choices=["npz", "json"], default="npz",
+                        help="npz: compact fp16 vectors + review_offsets (default, ~10x smaller). "
+                             "json: legacy nested {review:{sentence:{text,vector}}}.")
     parser.add_argument("--backend", choices=["local", "cloud"], default="cloud")
     parser.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL)
     parser.add_argument("--device", default=None)
@@ -222,6 +294,7 @@ def main():
         args.output_dir,
         args.backend,
         overwrite=args.overwrite,
+        output_format=args.output_format,
         local_model=args.local_model,
         device=args.device,
         base_url=args.base_url,

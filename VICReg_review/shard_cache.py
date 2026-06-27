@@ -241,7 +241,8 @@ def parse_args():
     build.add_argument("--out", required=True, type=Path,
                        help="Output train_sequence.json path.")
     build.add_argument("--seed", type=int, default=42)
-    build.add_argument("--pattern", default="*.json")
+    build.add_argument("--pattern", default="*.npz",
+                       help="Glob for per-game corpus files (default *.npz; use *.json for legacy).")
 
     inspect = sub.add_parser("inspect", help="Summarize a sequence and its block layout.")
     inspect.add_argument("--sequence-file", required=True, type=Path)

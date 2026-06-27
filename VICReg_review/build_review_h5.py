@@ -19,6 +19,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -27,6 +28,8 @@ import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))  # for `import game_npz` under multiprocessing workers
 
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "game_review_data" / "combined_gamedata" / "embedded"
 DEFAULT_H5_DIR = SCRIPT_DIR / "h5"
@@ -67,7 +70,12 @@ def atomic_h5_path(path):
 
 
 def load_game_as_arrays(path, dtype, input_dim):
-    with Path(path).open("r", encoding="utf-8") as file:
+    path = Path(path)
+    if path.suffix == ".npz":
+        from game_npz import load_game_flat
+        return load_game_flat(path, dtype, input_dim)
+
+    with path.open("r", encoding="utf-8") as file:
         raw = json.load(file)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} is not a review mapping.")
@@ -215,11 +223,12 @@ def partition_files(files, shard_count):
 
 def build_shards(args):
     input_dir = Path(args.input_dir)
-    files = sorted(input_dir.glob("*.json"))
+    # Prefer the compact .npz corpus; fall back to legacy per-game .json.
+    files = sorted(input_dir.glob("*.npz")) or sorted(input_dir.glob("*.json"))
     if args.limit_files > 0:
         files = files[: args.limit_files]
     if not files:
-        raise ValueError(f"No JSON files found in {input_dir}")
+        raise ValueError(f"No .npz or .json files found in {input_dir}")
 
     shard_count = args.shards or args.workers
     partitions = partition_files(files, shard_count)

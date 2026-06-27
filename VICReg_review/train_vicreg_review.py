@@ -74,7 +74,15 @@ def grl_lambda_at(global_step, steps_per_epoch, args):
 
 
 def load_game_review_vectors(path):
-    with Path(path).open("r", encoding="utf-8") as file:
+    path = Path(path)
+    if path.suffix == ".npz":
+        from game_npz import load_game_review_arrays
+        reviews = [torch.from_numpy(arr).float() for arr in load_game_review_arrays(path)]
+        if not reviews:
+            raise ValueError(f"{path} contains no sentence vectors.")
+        return reviews
+
+    with path.open("r", encoding="utf-8") as file:
         raw = json.load(file)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must be a review_id -> sentences mapping.")
@@ -113,11 +121,12 @@ class GameReviewVicRegDataset(Dataset):
         limit_games=0,
     ):
         self.input_dir = Path(input_dir)
-        self.files = sorted(self.input_dir.glob("*.json"))
+        # Prefer the compact .npz corpus; fall back to legacy per-game .json.
+        self.files = sorted(self.input_dir.glob("*.npz")) or sorted(self.input_dir.glob("*.json"))
         if limit_games and limit_games > 0:
             self.files = self.files[:limit_games]
         if not self.files:
-            raise ValueError(f"No JSON game files found in {self.input_dir}.")
+            raise ValueError(f"No .npz or .json game files found in {self.input_dir}.")
         if not (0.0 < sample_fraction <= 1.0):
             raise ValueError("--sample-fraction must be in (0, 1].")
         self.sample_fraction = float(sample_fraction)
