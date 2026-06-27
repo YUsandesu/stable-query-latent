@@ -212,11 +212,25 @@ def embed_incloud(
     vectors_ram = np.empty((total_sentences, dim), dtype=vector_dtype)
 
     torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
+    print(
+        f"embed_incloud: sorting {total_sentences} sentences by length "
+        f"(sort={sort}) and building batches ...",
+        flush=True,
+    )
+    sort_started = time.time()
     batches = list(length_sorted_batches(texts, batch_size, sort=sort))
     n_batches = len(batches)
     max_in_flight = max(1, prefetch)
+    print(
+        f"embed_incloud: {n_batches} batches ready in {time.time() - sort_started:.1f}s; "
+        f"starting GPU embedding (longest sentences first)",
+        flush=True,
+    )
     embed_started = time.time()
     done_sentences = 0
+    done_batches = 0
+    last_log_batches = 0
+    log_every = 50
 
     def tokenize_job(batch_indices):
         batch_texts = [texts[i] for i in batch_indices]
@@ -243,12 +257,17 @@ def embed_incloud(
                 vectors = embedder.embed_tokens(enc, normalize=normalize, out_dtype=torch_out_dtype)
                 vectors_ram[batch_indices] = vectors
                 done_sentences += len(batch_indices)
+                done_batches += 1
             fill()
-            if done_sentences == total_sentences or done_sentences % max(batch_size * 50, 1) < batch_size:
+            # Log the first batch (immediate sign of life), then every log_every
+            # batches, then the final one.
+            if done_batches == 1 or done_batches == n_batches or done_batches - last_log_batches >= log_every:
+                last_log_batches = done_batches
                 elapsed = time.time() - embed_started
                 rate = done_sentences / elapsed if elapsed > 0 else 0.0
                 print(
-                    f"[embed-incloud] {done_sentences}/{total_sentences} sentences "
+                    f"[embed-incloud] batch {done_batches}/{n_batches} "
+                    f"{done_sentences}/{total_sentences} sentences "
                     f"elapsed={elapsed:.1f}s rate={rate:.0f}/s",
                     flush=True,
                 )
