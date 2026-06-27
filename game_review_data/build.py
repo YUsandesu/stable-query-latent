@@ -33,8 +33,10 @@ Pipeline stages (two top-level dirs control all paths):
 
   --embed-dir  (default: game_review_data/combined_gamedata/embedded/)
     4. embedded          → <embed-dir>/                (Qwen3 embed, local or cloud)
+    5. index             → <embed-dir>/train_games.csv (game-id -> json + tags/positive rate)
+                         → <embed-dir>/train_sequence.json (seeded training order)
 
-  5. h5 (optional)     → VICReg_review/h5/           (shard+merge into one HDF5)
+  6. h5 (legacy, optional) → VICReg_review/h5/        (only for the small single-H5 sweep)
 
 Every stage is resumable: existing output files are skipped unless --overwrite.
 Pass --only or --skip to run a subset of stages 2-4; use --build-h5 for stage 5.
@@ -43,6 +45,7 @@ Pass --only or --skip to run a subset of stages 2-4; use --build-h5 for stage 5.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -64,7 +67,21 @@ H5_SCRIPT = PROJECT_ROOT / "VICReg_review" / "build_review_h5.py"
 DEFAULT_DATA_DIR = SCRIPT_DIR          # downloads, games.json, metadata, sentences
 DEFAULT_EMBED_DIR = SCRIPT_DIR / "combined_gamedata" / "embedded"  # embedded JSONs
 
-PIPELINE_STAGES = ("metadata", "split", "embed")
+PIPELINE_STAGES = ("metadata", "split", "embed", "index")
+
+# Columns of the master corpus index. Replaces the per-game metadata the old H5
+# used to carry (appids / game_titles / tags), so eval/probes can map a game id
+# back to its JSON file and its tags / positive rate without an H5.
+TRAIN_GAMES_COLUMNS = (
+    "game_name",      # JSON file stem, e.g. "<appid>_<count>"
+    "json_file",      # "<stem>.json" (lives in the embedded corpus dir)
+    "appid",          # Steam appid (stem before the first "_")
+    "title",          # games.json "name"
+    "positive",       # source1 only; blank for Kaggle source2
+    "negative",       # source1 only; blank for Kaggle source2
+    "positive_rate",  # positive / (positive + negative) when both present
+    "tags",           # raw games.json tags dict, JSON-encoded (tag -> count)
+)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -303,6 +320,73 @@ def merge_games_json(sources: list[Path], output_path: Path, overwrite: bool) ->
     return merged
 
 
+def write_train_games_csv(corpus_dir: Path, games_json: Path, out_csv: Path) -> Path | None:
+    """Write the master game index for the embedded corpus.
+
+    One row per JSON game file in ``corpus_dir``, joined against the merged
+    ``games.json`` by appid. This is the table training/eval use to map a game id
+    to its JSON file and its tags / positive rate (the role the H5 metadata arrays
+    used to play). Source2 (Kaggle) games have no positive/negative, so those
+    columns are left blank for them.
+    """
+    corpus_dir = Path(corpus_dir)
+    stems = sorted(p.stem for p in corpus_dir.glob("*.json"))
+    if not stems:
+        print(f"[warn] train_games.csv: no JSON files in {corpus_dir}; skipping index.", flush=True)
+        return None
+
+    games = {}
+    if Path(games_json).exists():
+        loaded = json.loads(Path(games_json).read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            games = loaded
+
+    rows = []
+    missing_meta = 0
+    for stem in stems:
+        appid = stem.split("_")[0]
+        record = games.get(appid) or {}
+        if not record:
+            missing_meta += 1
+        positive = record.get("positive")
+        negative = record.get("negative")
+        positive_rate = ""
+        if isinstance(positive, (int, float)) and isinstance(negative, (int, float)):
+            total = positive + negative
+            if total > 0:
+                positive_rate = f"{positive / total:.6f}"
+        rows.append({
+            "game_name": stem,
+            "json_file": f"{stem}.json",
+            "appid": appid,
+            "title": record.get("name") or appid,
+            "positive": positive if positive is not None else "",
+            "negative": negative if negative is not None else "",
+            "positive_rate": positive_rate,
+            "tags": json.dumps(record.get("tags") or {}, ensure_ascii=False, sort_keys=True),
+        })
+
+    out_csv = Path(out_csv)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_csv.with_name(out_csv.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(TRAIN_GAMES_COLUMNS))
+            writer.writeheader()
+            writer.writerows(rows)
+        tmp.replace(out_csv)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    print(
+        f"train_games.csv: {len(rows)} games "
+        f"({missing_meta} without games.json metadata) -> {out_csv}",
+        flush=True,
+    )
+    return out_csv
+
+
 def run_h5_build(args, embed_dir: Path, games_json: Path) -> None:
     cmd = [
         str(args.python),
@@ -373,6 +457,15 @@ def parse_args():
     parser.add_argument("--build-h5", action="store_true",
                         help="After embedding, run build_review_h5.py → VICReg_review/h5/.")
     parser.add_argument("--overwrite", action="store_true")
+
+    # Corpus index ('index' stage): master game-id table + training sequence,
+    # written next to the embedded JSON corpus.
+    parser.add_argument("--train-games-csv", type=Path, default=None,
+                        help="Master game index CSV (default: <embed-dir>/train_games.csv).")
+    parser.add_argument("--write-sequence", action=argparse.BooleanOptionalAction, default=True,
+                        help="Also write train_sequence.json (seeded random training order) next to the corpus.")
+    parser.add_argument("--sequence-seed", type=int, default=42,
+                        help="Seed for the train_sequence.json shuffle.")
 
     # Cleaning / filtering (note.txt spec)
     parser.add_argument("--min-length", type=int, default=300)
@@ -539,7 +632,20 @@ def main():
             normalize=args.normalize,
         )
 
-    # ------------------------------------------------------------------ H5 build
+    # ------------------------------------------------------------------ stage 4: index
+    if "index" in run:
+        print("\n--- stage 4/4: index (master train_games.csv + training sequence) ---", flush=True)
+        # The corpus is the embedded JSON dir; fall back to metadata if embed was skipped.
+        corpus_dir = embed_dir if any(embed_dir.glob("*.json")) else metadata_dir
+        train_games_csv = args.train_games_csv or (embed_dir / "train_games.csv")
+        write_train_games_csv(corpus_dir, games_json_path, train_games_csv)
+
+        if args.write_sequence and any(embed_dir.glob("*.json")):
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from VICReg_review.shard_cache import build_sequence
+            build_sequence(embed_dir, embed_dir / "train_sequence.json", seed=args.sequence_seed)
+
+    # ------------------------------------------------------------------ H5 build (legacy/optional)
     if args.build_h5:
         print("\n--- H5: shard + merge -> VICReg_review/h5/ ---", flush=True)
         run_h5_build(args, embed_dir, games_json_path)

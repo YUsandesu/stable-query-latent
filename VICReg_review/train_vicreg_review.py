@@ -13,6 +13,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
@@ -28,6 +29,13 @@ from VICReg_review.model import (  # noqa: E402
     load_mlp4_a_sentiment_head,
     vicreg_loss,
 )
+from VICReg_review.shard_cache import (  # noqa: E402
+    PrefetchCache,
+    group_blocks,
+    load_sequence,
+)
+
+GIB = 1 << 30
 
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "game_review_data" / "game_review_cleaned_3_sentences"
 DEFAULT_SST_CHECKPOINT = PROJECT_ROOT / "sst" / "heads" / "mlp4_1024_128_32_8_1_best.pt"
@@ -254,17 +262,12 @@ def next_batch(loader, iterator):
         return next(iterator), iterator
 
 
-def train(args):
-    torch.manual_seed(args.seed)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    loader_batch_size = 1 if args.sequential_game_batch else args.batch_size
-    dataset, loader = make_loader(args, device, loader_batch_size=loader_batch_size)
-    if args.sequential_game_batch:
-        default_steps_per_epoch = math.ceil(len(dataset) / args.batch_size)
-    else:
-        default_steps_per_epoch = len(loader)
-    steps_per_epoch = args.steps_per_epoch or default_steps_per_epoch
+def build_model_adversary_optimizer(args, device):
+    """Build the encoder, sentiment adversary, optimizer and AMP scaler.
 
+    Shared by the in-memory trainer (train) and the streaming trainer
+    (train_streaming) so both use identical model wiring.
+    """
     model = LatentArrayMLP(
         input_dim=args.input_dim,
         latent_dim=args.latent_dim,
@@ -282,12 +285,100 @@ def train(args):
         probe_dim=1024,
         grl_lambda=args.grl_lambda,
     ).to(device)
-
     # Probe is a learnable adversary on the head side; include it in the optimizer.
     trainable = list(model.parameters()) + [p for p in adversary.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=args.weight_decay)
     amp_enabled = args.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    return model, adversary, optimizer, scaler, amp_enabled
+
+
+def forward_batch(model, batch, device, amp_enabled, pin_memory):
+    """Encode both views of one collated batch (batch_size games padded together)."""
+    view_a = batch["view_a"].to(device, non_blocking=pin_memory)
+    mask_a = batch["mask_a"].to(device, non_blocking=pin_memory)
+    view_b = batch["view_b"].to(device, non_blocking=pin_memory)
+    mask_b = batch["mask_b"].to(device, non_blocking=pin_memory)
+    with torch.amp.autocast("cuda", enabled=amp_enabled):
+        z_a = model(view_a, key_padding_mask=mask_a)
+        z_b = model(view_b, key_padding_mask=mask_b)
+    return z_a, z_b, batch["len_a"], batch["len_b"], batch["games"]
+
+
+def optimize_on_views(args, model, adversary, optimizer, scaler, amp_enabled,
+                      z_a, z_b, len_a, len_b, current_grl):
+    """VICReg + adversary loss, backward and optimizer step. Returns the metrics dict.
+
+    Single source of the loss math for both trainers; the caller is responsible
+    for zero_grad and for setting adversary.grl.lambda_ beforehand.
+    """
+    with torch.amp.autocast("cuda", enabled=amp_enabled):
+        vic = vicreg_loss(
+            z_a,
+            z_b,
+            invariance_weight=args.vicreg_invariance_weight,
+            variance_weight=args.vicreg_variance_weight,
+            covariance_weight=args.vicreg_covariance_weight,
+        )
+        adv_a, stats_a = adversary(z_a)
+        adv_b, stats_b = adversary(z_b)
+        adv_loss = 0.5 * (adv_a + adv_b)
+        loss = vic["loss"] + args.adversary_weight * adv_loss
+
+    scaler.scale(loss).backward()
+    if args.grad_clip > 0:
+        scaler.unscale_(optimizer)
+        # Clip encoder + learnable probe together (all optimized params).
+        params = [p for group in optimizer.param_groups for p in group["params"]]
+        clip_grad_norm_(params, args.grad_clip)
+    scaler.step(optimizer)
+    scaler.update()
+
+    return {
+        "grl_lambda": current_grl,
+        "loss": float(loss.detach().cpu()),
+        "vicreg": float(vic["loss"].detach().cpu()),
+        "invariance": float(vic["invariance"].detach().cpu()),
+        "variance": float(vic["variance"].detach().cpu()),
+        "covariance": float(vic["covariance"].detach().cpu()),
+        "adversary_entropy_loss": float(adv_loss.detach().cpu()),
+        "sentiment_mean": float((stats_a["sentiment_mean"] + stats_b["sentiment_mean"]).mul(0.5).cpu()),
+        "sentiment_std": float((stats_a["sentiment_std"] + stats_b["sentiment_std"]).mul(0.5).cpu()),
+        "sentiment_entropy": float(
+            (stats_a["sentiment_entropy"] + stats_b["sentiment_entropy"]).mul(0.5).cpu()
+        ),
+        "sentences_a": float(len_a.float().mean().item()),
+        "sentences_b": float(len_b.float().mean().item()),
+    }
+
+
+def make_checkpoint(args, model, optimizer, epoch, global_step, averaged):
+    return {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+        "args": vars(args),
+        "metrics": averaged,
+        "model_class": "LatentArrayMLP",
+        "num_latents": args.num_latents,
+        "latent_dim": args.latent_dim,
+        "sst_checkpoint": str(Path(args.sst_checkpoint).resolve()),
+    }
+
+
+def train(args):
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    loader_batch_size = 1 if args.sequential_game_batch else args.batch_size
+    dataset, loader = make_loader(args, device, loader_batch_size=loader_batch_size)
+    if args.sequential_game_batch:
+        default_steps_per_epoch = math.ceil(len(dataset) / args.batch_size)
+    else:
+        default_steps_per_epoch = len(loader)
+    steps_per_epoch = args.steps_per_epoch or default_steps_per_epoch
+
+    model, adversary, optimizer, scaler, amp_enabled = build_model_adversary_optimizer(args, device)
     history_rows = []
     best_loss = float("inf")
     global_step = 0
@@ -337,56 +428,15 @@ def train(args):
                     len_b = torch.cat(len_b_parts, dim=0)
                 else:
                     batch, iterator = next_batch(loader, iterator)
-                    view_a = batch["view_a"].to(device, non_blocking=pin_memory)
-                    mask_a = batch["mask_a"].to(device, non_blocking=pin_memory)
-                    view_b = batch["view_b"].to(device, non_blocking=pin_memory)
-                    mask_b = batch["mask_b"].to(device, non_blocking=pin_memory)
-                    games = batch["games"]
-                    len_a = batch["len_a"]
-                    len_b = batch["len_b"]
-                    with torch.amp.autocast("cuda", enabled=amp_enabled):
-                        z_a = model(view_a, key_padding_mask=mask_a)
-                        z_b = model(view_b, key_padding_mask=mask_b)
-
-                with torch.amp.autocast("cuda", enabled=amp_enabled):
-                    vic = vicreg_loss(
-                        z_a,
-                        z_b,
-                        invariance_weight=args.vicreg_invariance_weight,
-                        variance_weight=args.vicreg_variance_weight,
-                        covariance_weight=args.vicreg_covariance_weight,
+                    z_a, z_b, len_a, len_b, games = forward_batch(
+                        model, batch, device, amp_enabled, pin_memory
                     )
-                    adv_a, stats_a = adversary(z_a)
-                    adv_b, stats_b = adversary(z_b)
-                    adv_loss = 0.5 * (adv_a + adv_b)
-                    loss = vic["loss"] + args.adversary_weight * adv_loss
 
-                scaler.scale(loss).backward()
-                if args.grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    # Clip encoder + learnable probe together (all optimized params).
-                    params = [p for group in optimizer.param_groups for p in group["params"]]
-                    clip_grad_norm_(params, args.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-
+                metrics = optimize_on_views(
+                    args, model, adversary, optimizer, scaler, amp_enabled,
+                    z_a, z_b, len_a, len_b, current_grl,
+                )
                 global_step += 1
-                metrics = {
-                    "grl_lambda": current_grl,
-                    "loss": float(loss.detach().cpu()),
-                    "vicreg": float(vic["loss"].detach().cpu()),
-                    "invariance": float(vic["invariance"].detach().cpu()),
-                    "variance": float(vic["variance"].detach().cpu()),
-                    "covariance": float(vic["covariance"].detach().cpu()),
-                    "adversary_entropy_loss": float(adv_loss.detach().cpu()),
-                    "sentiment_mean": float((stats_a["sentiment_mean"] + stats_b["sentiment_mean"]).mul(0.5).cpu()),
-                    "sentiment_std": float((stats_a["sentiment_std"] + stats_b["sentiment_std"]).mul(0.5).cpu()),
-                    "sentiment_entropy": float(
-                        (stats_a["sentiment_entropy"] + stats_b["sentiment_entropy"]).mul(0.5).cpu()
-                    ),
-                    "sentences_a": float(len_a.float().mean().item()),
-                    "sentences_b": float(len_b.float().mean().item()),
-                }
                 last_metrics = metrics
                 for key, value in metrics.items():
                     epoch_sums[key] = epoch_sums.get(key, 0.0) + value
@@ -404,18 +454,7 @@ def train(args):
             averaged = {key: value / steps_per_epoch for key, value in epoch_sums.items()}
             history_rows.append({"epoch": epoch, "global_step": global_step, **averaged})
 
-            checkpoint = {
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "epoch": epoch,
-                "global_step": global_step,
-                "args": vars(args),
-                "metrics": averaged,
-                "model_class": "LatentArrayMLP",
-                "num_latents": args.num_latents,
-                "latent_dim": args.latent_dim,
-                "sst_checkpoint": str(Path(args.sst_checkpoint).resolve()),
-            }
+            checkpoint = make_checkpoint(args, model, optimizer, epoch, global_step, averaged)
             if not args.no_save:
                 atomic_torch_save(checkpoint, args.checkpoint_out)
             if averaged["loss"] < best_loss:
@@ -453,6 +492,150 @@ def write_history(rows, path):
     atomic_text_write("\n".join(lines) + "\n", path)
 
 
+def train_streaming(args):
+    """Out-of-core trainer: stream per-game JSON from a (possibly cloud) source dir
+    through a local prefetch cache, in a fixed seeded random order.
+
+    One epoch = one full pass over the corpus (all blocks). Within a resident
+    block, games are shuffled and batched exactly like the in-memory trainer; the
+    pre-shuffled file order is what gives each block its cross-corpus diversity,
+    so the VICReg variance/covariance statistics stay well-conditioned even
+    though only one block (~--block-gb GiB) is on local disk at a time.
+    """
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    pin_memory = device.type == "cuda"
+
+    if args.sequential_game_batch:
+        print(
+            "[warn] --sequential-game-batch is ignored in streaming mode; "
+            "using padded batches of --batch-size games.",
+            flush=True,
+        )
+
+    sequence = load_sequence(args.sequence_file)
+    source_dir = Path(args.source_dir) if args.source_dir else Path(sequence["source_dir"])
+    entries = sequence["files"]
+    blocks = group_blocks(entries, int(args.block_gb * GIB))
+    args.input_dir = str(source_dir)  # for manifest bookkeeping
+
+    # GRL schedule and epoch averaging both need the per-epoch step count up front.
+    batch_size = max(1, args.batch_size)
+    passes = max(1, args.passes_per_block)
+    steps_per_epoch = sum(math.ceil(len(b) / batch_size) for b in blocks) * passes
+
+    model, adversary, optimizer, scaler, amp_enabled = build_model_adversary_optimizer(args, device)
+    history_rows = []
+    best_loss = float("inf")
+    global_step = 0
+
+    print(
+        f"device={device} STREAMING source={source_dir}\n"
+        f"cache_dir={args.cache_dir} games={len(entries)} "
+        f"corpus={sequence['total_bytes'] / GIB:.1f}GiB blocks={len(blocks)} "
+        f"block_gb={args.block_gb} prefetch_ahead={args.prefetch_ahead} passes_per_block={passes}\n"
+        f"batch_size={batch_size} steps_per_epoch~={steps_per_epoch} "
+        f"sample_fraction={args.sample_fraction} max_sentences={args.max_sentences}",
+        flush=True,
+    )
+    print(f"model=LatentArrayMLP params={sum(p.numel() for p in model.parameters())}")
+    print(f"sentiment_head={args.sst_checkpoint}")
+
+    last_metrics = None
+    cache = None
+    try:
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            epoch_sums = {}
+            step = 0
+
+            # Optionally reshuffle block ORDER each epoch (cheap extra variety on
+            # top of the fixed file order); files within a block stay grouped.
+            order = list(range(len(blocks)))
+            if args.shuffle_blocks:
+                np.random.default_rng(args.seed + epoch).shuffle(order)
+            epoch_blocks = [blocks[i] for i in order]
+
+            cache = PrefetchCache(
+                source_dir, args.cache_dir, epoch_blocks, prefetch_ahead=args.prefetch_ahead
+            )
+            for block_index, block_dir, _entries in cache.iter_blocks():
+                for _pass in range(passes):
+                    dataset = GameReviewVicRegDataset(
+                        block_dir,
+                        sample_fraction=args.sample_fraction,
+                        max_sentences=args.max_sentences,
+                        cache_games=args.cache_games,
+                        limit_games=0,
+                    )
+                    loader = DataLoader(
+                        dataset,
+                        batch_size=batch_size,
+                        shuffle=True,
+                        num_workers=args.num_workers,
+                        pin_memory=pin_memory,
+                        collate_fn=collate_review_views,
+                    )
+                    for batch in loader:
+                        current_grl = grl_lambda_at(global_step, steps_per_epoch, args)
+                        adversary.grl.lambda_ = current_grl
+                        optimizer.zero_grad(set_to_none=True)
+                        z_a, z_b, len_a, len_b, games = forward_batch(
+                            model, batch, device, amp_enabled, pin_memory
+                        )
+                        metrics = optimize_on_views(
+                            args, model, adversary, optimizer, scaler, amp_enabled,
+                            z_a, z_b, len_a, len_b, current_grl,
+                        )
+                        global_step += 1
+                        step += 1
+                        last_metrics = metrics
+                        for key, value in metrics.items():
+                            epoch_sums[key] = epoch_sums.get(key, 0.0) + value
+
+                        if step == 1 or step % args.log_every == 0:
+                            game_text = ",".join(games[:3])
+                            print(
+                                f"epoch={epoch:03d} block={block_index:03d} "
+                                f"step={step:05d}/~{steps_per_epoch} "
+                                f"loss={metrics['loss']:.4f} vic={metrics['vicreg']:.4f} "
+                                f"inv={metrics['invariance']:.4f} var={metrics['variance']:.4f} "
+                                f"cov={metrics['covariance']:.4f} "
+                                f"adv_entropy={metrics['sentiment_entropy']:.4f} "
+                                f"sent_mean={metrics['sentiment_mean']:.4f} games={game_text}",
+                                flush=True,
+                            )
+
+            denom = max(1, step)
+            averaged = {key: value / denom for key, value in epoch_sums.items()}
+            history_rows.append({"epoch": epoch, "global_step": global_step, **averaged})
+
+            checkpoint = make_checkpoint(args, model, optimizer, epoch, global_step, averaged)
+            if not args.no_save:
+                atomic_torch_save(checkpoint, args.checkpoint_out)
+            if averaged.get("loss", float("inf")) < best_loss:
+                best_loss = averaged["loss"]
+                if not args.no_save:
+                    atomic_torch_save(checkpoint, args.best_checkpoint_out)
+
+            write_history(history_rows, args.history_tsv)
+            write_manifest(args.manifest_json, "running", args, epoch, global_step, averaged)
+
+        write_manifest(args.manifest_json, "done", args, args.epochs, global_step, last_metrics)
+    except KeyboardInterrupt:
+        write_manifest(args.manifest_json, "interrupted", args,
+                       epoch if "epoch" in locals() else 0, global_step, last_metrics)
+        raise
+    except BaseException as exc:
+        write_manifest(args.manifest_json, "error", args,
+                       epoch if "epoch" in locals() else 0, global_step, last_metrics,
+                       error=f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if args.cleanup_cache and cache is not None:
+            cache.cleanup()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR))
@@ -480,6 +663,27 @@ def parse_args():
     parser.add_argument("--cache-games", type=int, default=1)
     parser.add_argument("--limit-games", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=0)
+
+    # Streaming / prefetch-cache mode (out-of-core training over a per-game JSON corpus).
+    # Passing --sequence-file switches train() -> train_streaming().
+    parser.add_argument("--sequence-file", default=None,
+                        help="train_sequence.json from `shard_cache.py build`. Enables streaming mode: "
+                             "per-game JSON is streamed from --source-dir through --cache-dir in the "
+                             "sequence's fixed random order. Overrides --input-dir.")
+    parser.add_argument("--source-dir", default=None,
+                        help="Override the corpus source dir recorded in the sequence (e.g. a Drive path).")
+    parser.add_argument("--cache-dir", default=str(DEFAULT_HEADS_DIR.parent / "training_space"),
+                        help="Local working-set dir that blocks are copied into during streaming.")
+    parser.add_argument("--block-gb", type=float, default=100.0,
+                        help="Local working-set size per block in GiB (100 = ~100GB resident at a time).")
+    parser.add_argument("--prefetch-ahead", type=int, default=1,
+                        help="Blocks copied ahead while training the current one (1=double-buffered, 0=sequential).")
+    parser.add_argument("--passes-per-block", type=int, default=1,
+                        help="DataLoader passes over each resident block before releasing it (amortizes download).")
+    parser.add_argument("--shuffle-blocks", action=argparse.BooleanOptionalAction, default=True,
+                        help="Reshuffle block ORDER each epoch (files within a block stay grouped).")
+    parser.add_argument("--cleanup-cache", action=argparse.BooleanOptionalAction, default=True,
+                        help="Delete cached block dirs from --cache-dir on exit.")
 
     parser.add_argument("--input-dim", type=int, default=1024)
     parser.add_argument("--latent-dim", type=int, default=256)
@@ -517,7 +721,11 @@ def parse_args():
 
 
 def main():
-    train(parse_args())
+    args = parse_args()
+    if args.sequence_file:
+        train_streaming(args)
+    else:
+        train(args)
 
 
 if __name__ == "__main__":
