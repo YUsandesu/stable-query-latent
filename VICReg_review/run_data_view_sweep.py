@@ -8,9 +8,11 @@ The sweep varies four axes:
 * arm: GRL adversary enabled vs disabled. The no-GRL arm also disables the
   recommendation loss for the corrected ablation.
 
-Evaluation is always performed against the full 293-game H5 candidate pool. The
-six long diagnostic texts are test-only here; the default description cache is
-the train-only cache that excludes those texts.
+Evaluation is always performed against the full H5 candidate pool (every game in
+the H5, however many there are). A train-game-count of 0 (the default) trains on
+that full pool; positive values train on a seeded subset for the data-size axis.
+The six long diagnostic texts are test-only here; the default description cache
+is the train-only cache that excludes those texts.
 """
 
 from __future__ import annotations
@@ -88,8 +90,16 @@ def timestamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def train_games_label(train_games: int) -> str:
+    """Folder/label token for a train-game-count. 0 (or less) == the full pool."""
+    return "all" if train_games <= 0 else f"{train_games:03d}"
+
+
 def combo_name(output_dim: int, arm: str, train_games: int, view: float) -> str:
-    return f"dim{output_dim:03d}_{arm_label(arm)}_n{train_games:03d}_view{int(round(view * 100)):02d}"
+    return (
+        f"dim{output_dim:03d}_{arm_label(arm)}_n{train_games_label(train_games)}"
+        f"_view{int(round(view * 100)):02d}"
+    )
 
 
 def combo_arm_from_dir(combo_dir: Path) -> str | None:
@@ -238,8 +248,10 @@ def is_resumable_partial(args, output_dim: int, arm: str, train_games: int, view
 def should_try_paired_training(output_dim: int, train_games: int, view: float) -> bool:
     # The n=100/view=0.8 pair repeatedly OOMs on the 20GB Windows GPU.
     # Single-arm runs use the same seed and sampled batches while avoiding the
-    # doubled activation/optimizer footprint.
-    if view >= 0.8 and train_games >= 100:
+    # doubled activation/optimizer footprint. train_games <= 0 means the full
+    # pool (the largest set), so it counts as "large" for this OOM guard.
+    is_full = train_games <= 0
+    if view >= 0.8 and (is_full or train_games >= 100):
         return False
     return True
 
@@ -446,7 +458,8 @@ def embed_test_cases(args) -> dict:
 
 
 def eval_feature_cache_path(combo_dir: Path) -> Path:
-    return combo_dir / "eval_features_full293_fv4.npz"
+    # Eval is over the full H5 pool (whatever its size); no game count in the name.
+    return combo_dir / "eval_features_full_fv4.npz"
 
 
 def build_vicreg_feature_cache(args, checkpoint: Path, combo_dir: Path) -> tuple[np.ndarray, list[str]]:
@@ -1011,10 +1024,10 @@ def render_report(rows: list[dict], args) -> str:
         "",
         f"- 日期：{time.strftime('%Y-%m-%d')}",
         f"- 输出维度轴：{', '.join(str(x) for x in args.output_dims)}",
-        f"- 总游戏数：293；实验数据量轴：{', '.join(str(x) for x in args.train_game_counts)}",
+        f"- 总游戏数：{getattr(args, 'num_games', '?')}；实验数据量轴（0=全量）：{', '.join(str(x) for x in args.train_game_counts)}",
         f"- view fraction：{', '.join(f'{v:.1f}' for v in args.sample_fractions)}",
         f"- 对照 arm：{', '.join(args.arms)}（grl=GRL 10 + reco 30；nogrl=GRL 0 + reco 0）。",
-        "- 评估候选池：始终使用全量 293 款游戏。",
+        f"- 评估候选池：始终使用全量 {getattr(args, 'num_games', '?')} 款游戏。",
         "- 测试文本：BG3、Cyberpunk、Across the Obelisk 的官方描述/长文本只在测试阶段使用；训练使用 train-only description cache。",
         f"- 每组合训练预算：epochs={args.epochs}, steps_per_epoch={args.steps_per_epoch}, batch_size={args.batch_size}。",
         "- 训练显存策略：split_recompute，把句嵌入 -> latentArray 的长序列段与后续层次降维分段反传，默认不截断 view。",
@@ -1191,8 +1204,42 @@ def write_sweep_manifest(args, status: str, rows: list[dict] | None = None, curr
     atomic_json_write(payload, args.out_dir / "sweep_manifest.json")
 
 
+def resolve_pool_and_counts(args) -> int:
+    """Read the H5 game pool size and normalize --train-game-counts against it.
+
+    A requested count of 0/negative, or one >= the pool size, means "train on the
+    full pool" and is collapsed to 0. Duplicates are removed, order preserved.
+    Returns the pool size (number of games in the H5).
+    """
+    if not Path(args.h5).exists():
+        raise SystemExit(
+            f"H5 not found: {args.h5}\n"
+            "Build it from the embedded corpus first, e.g.:\n"
+            "  python VICReg_review/build_review_h5.py --input-dir <embedded> "
+            "--games-json <games.json> --output-h5 " + str(args.h5)
+        )
+    with h5py.File(args.h5, "r") as h5:
+        pool = int(h5["game_names"].shape[0])
+
+    normalized = []
+    seen = set()
+    for count in args.train_game_counts:
+        effective = 0 if (count <= 0 or count >= pool) else count
+        if effective not in seen:
+            seen.add(effective)
+            normalized.append(effective)
+    args.train_game_counts = normalized
+    args.num_games = pool
+    return pool
+
+
 def run(args) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    pool = resolve_pool_and_counts(args)
+    print(
+        f"H5 pool: {pool} games | train-game-counts (0=full): {args.train_game_counts}",
+        flush=True,
+    )
     args.sweep_started_at = timestamp()
     write_sweep_manifest(args, "running", summarize(args))
     current = None
@@ -1280,7 +1327,11 @@ def parse_args():
     parser.add_argument("--h5", default=DEFAULT_H5, type=Path)
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR, type=Path)
     parser.add_argument("--python", default=DEFAULT_PYTHON, type=Path, help="Python executable for child training runs.")
-    parser.add_argument("--train-game-counts", type=int, nargs="+", default=[50, 100, 150, 200, 250, 293])
+    parser.add_argument("--train-game-counts", type=int, nargs="+", default=[0],
+                        help="Games visible during training, per combo. 0 = the full H5 pool "
+                             "(source1+source2). Positive values train on a seeded subset for "
+                             "the data-size axis; a value >= the pool size is treated as full. "
+                             "Default [0] = train on everything.")
     parser.add_argument("--sample-fractions", type=float, nargs="+", default=[0.8, 0.6, 0.4, 0.2])
     parser.add_argument("--output-dims", type=int, nargs="+", default=[18, 36, 72])
     parser.add_argument("--arms", nargs="+", default=["grl", "nogrl"], choices=["grl", "nogrl"])
