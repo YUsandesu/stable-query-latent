@@ -57,7 +57,7 @@ from VICReg_review.train_tag_probe import (  # noqa: E402
 DEFAULT_H5 = SCRIPT_DIR / "h5" / "game_review_cleaned_3_sentences.h5"
 DEFAULT_OUT_DIR = SCRIPT_DIR / "heads" / "data_view_sweep"
 DEFAULT_DESCRIPTION_CACHE = SCRIPT_DIR / "heads" / "description_embedding_cache_train_only.npz"
-DEFAULT_PYTHON = Path("C:/Users/admin/anaconda3/envs/cuda_Vit/python.exe")
+DEFAULT_PYTHON = Path(sys.executable)
 
 
 def atomic_text_write(text: str, path: Path) -> None:
@@ -1279,7 +1279,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--h5", default=DEFAULT_H5, type=Path)
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR, type=Path)
-    parser.add_argument("--python", default=DEFAULT_PYTHON, type=Path)
+    parser.add_argument("--python", default=DEFAULT_PYTHON, type=Path, help="Python executable for child training runs.")
     parser.add_argument("--train-game-counts", type=int, nargs="+", default=[50, 100, 150, 200, 250, 293])
     parser.add_argument("--sample-fractions", type=float, nargs="+", default=[0.8, 0.6, 0.4, 0.2])
     parser.add_argument("--output-dims", type=int, nargs="+", default=[18, 36, 72])
