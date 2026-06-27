@@ -23,13 +23,17 @@ Sources:
 
 When the same appid appears in both sources, source1 wins.
 
-Pipeline stages inside --workdir (default: combined_gamedata/):
+Pipeline stages (two top-level dirs control all paths):
 
-  0. download  source2 via kagglehub + prepare_kaggle_steam_reviews.py (auto)
-  1. games.json merge  → workdir/games.json         (source1 priority)
-  2. metadata          → workdir/metadata/           (clean+filter+prepend)
-  3. sentences         → workdir/sentences/          (SaT sentence split)
-  4. embedded          → workdir/embedded/           (Qwen3 embed, local or cloud)
+  --data-dir   (default: game_review_data/)
+    0. download  source1 from Mendeley + source2 via kagglehub (auto)
+    1. games.json merge  → <data-dir>/games.json       (source1 priority)
+    2. metadata          → <data-dir>/metadata/        (clean+filter+prepend)
+    3. sentences         → <data-dir>/sentences/       (SaT sentence split)
+
+  --embed-dir  (default: game_review_data/combined_gamedata/embedded/)
+    4. embedded          → <embed-dir>/                (Qwen3 embed, local or cloud)
+
   5. h5 (optional)     → VICReg_review/h5/           (shard+merge into one HDF5)
 
 Every stage is resumable: existing output files are skipped unless --overwrite.
@@ -51,21 +55,14 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
-# --------------------------------------------------------------------------- source paths
-SOURCE1_DIR = SCRIPT_DIR / "Steam Games Metadata and Player Reviews (2020–2024"
-SOURCE1_REVIEWS = SOURCE1_DIR / "Game Reviews"
-SOURCE1_GAMES_JSON = SOURCE1_DIR / "games.json"
+# --------------------------------------------------------------------------- constants
 SOURCE1_DOWNLOAD_URL = "https://data.mendeley.com/public-api/zip/jxy85cr3th/download/2"
-SOURCE1_ZIP_CACHE = SCRIPT_DIR / "mendeley_steam_reviews.zip"
-
 KAGGLE_DATASET = "andrewmvd/steam-reviews"
-DEFAULT_KAGGLE_CACHE = SCRIPT_DIR / "kagglehub_cache"
-DEFAULT_PREPARED_DIR = SCRIPT_DIR / "kaggle_steam_reviews_prepared"
-SOURCE2_REVIEWS = DEFAULT_PREPARED_DIR / "reviews"
-SOURCE2_GAMES_JSON = DEFAULT_PREPARED_DIR / "games.json"
-
-DEFAULT_WORKDIR = SCRIPT_DIR / "combined_gamedata"
 H5_SCRIPT = PROJECT_ROOT / "VICReg_review" / "build_review_h5.py"
+
+# Two top-level directory defaults (both overridable on the CLI)
+DEFAULT_DATA_DIR = SCRIPT_DIR          # downloads, games.json, metadata, sentences
+DEFAULT_EMBED_DIR = SCRIPT_DIR / "combined_gamedata" / "embedded"  # embedded JSONs
 
 PIPELINE_STAGES = ("metadata", "split", "embed")
 
@@ -151,12 +148,12 @@ def prepared_done(prepared_dir: Path) -> bool:
     )
 
 
-def download_and_prepare_kaggle(args) -> bool:
+def download_and_prepare_kaggle(args, source2_dir: Path, kaggle_cache: Path) -> bool:
     """Download Kaggle dataset and run prepare_kaggle_steam_reviews.py.
 
     Returns True if source2 is ready to use afterwards.
     """
-    prepared_dir = Path(args.source2_prepared_dir)
+    prepared_dir = source2_dir
 
     if prepared_done(prepared_dir) and not args.overwrite:
         print(f"source2: prepared data already exists at {prepared_dir}", flush=True)
@@ -177,9 +174,8 @@ def download_and_prepare_kaggle(args) -> bool:
             )
             return False
 
-        cache_dir = Path(args.kaggle_cache)
         old_cache = os.environ.get("KAGGLEHUB_CACHE")
-        os.environ["KAGGLEHUB_CACHE"] = str(cache_dir)
+        os.environ["KAGGLEHUB_CACHE"] = str(kaggle_cache)
         try:
             print(f"source2: downloading {KAGGLE_DATASET} ...", flush=True)
             kaggle_input = Path(kagglehub.dataset_download(KAGGLE_DATASET))
@@ -262,15 +258,17 @@ def merge_games_json(sources: list[Path], output_path: Path, overwrite: bool) ->
     return merged
 
 
-def run_h5_build(args, workdir: Path) -> None:
+def run_h5_build(args, embed_dir: Path, games_json: Path) -> None:
     cmd = [
         str(args.python),
         str(H5_SCRIPT),
-        "--input-dir", str(workdir / "embedded"),
-        "--games-json", str(workdir / "games.json"),
+        "--input-dir", str(embed_dir),
+        "--games-json", str(games_json),
         "--workers", str(args.h5_workers),
         "--shards", str(args.h5_shards),
     ]
+    if args.h5 is not None:
+        cmd += ["--output-h5", str(args.h5)]
     if args.overwrite:
         cmd.append("--overwrite")
     print("RUN " + " ".join(str(c) for c in cmd), flush=True)
@@ -281,19 +279,30 @@ def run_h5_build(args, workdir: Path) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
 
-    # Source 1 (2020-2024, auto-downloaded from Mendeley)
-    parser.add_argument("--source1-dir", type=Path, default=SOURCE1_DIR,
-                        help="Root directory for the 2020-2024 dataset after extraction.")
-    parser.add_argument("--source1-reviews", type=Path, default=SOURCE1_REVIEWS)
-    parser.add_argument("--source1-games-json", type=Path, default=SOURCE1_GAMES_JSON)
-    parser.add_argument("--source1-zip-cache", type=Path, default=SOURCE1_ZIP_CACHE,
-                        help="Where to cache the Mendeley zip file.")
+    # ---- Two top-level directory knobs ----
+    parser.add_argument(
+        "--data-dir", type=Path, default=DEFAULT_DATA_DIR,
+        help=(
+            "Root directory for downloads and cleaning outputs. "
+            "Layout: <dir>/Steam Games…/ (source1), <dir>/kaggle_steam_reviews_prepared/ (source2), "
+            "<dir>/games.json (merged), <dir>/metadata/, <dir>/sentences/. "
+            f"Default: {DEFAULT_DATA_DIR}"
+        ),
+    )
+    parser.add_argument(
+        "--embed-dir", type=Path, default=DEFAULT_EMBED_DIR,
+        help=(
+            "Directory that receives the embedded JSON files (one per game). "
+            "Also used as --input-dir for the H5 builder when --build-h5 is set. "
+            f"Default: {DEFAULT_EMBED_DIR}"
+        ),
+    )
+
+    # Source control
     parser.add_argument("--skip-source1", action="store_true",
-                        help="Skip source1 entirely.")
+                        help="Skip source1 (2020-2024 Mendeley dataset) entirely.")
     parser.add_argument("--skip-source1-download", action="store_true",
                         help="Skip downloading source1; use existing files if present.")
-
-    # Source 2 (Kaggle, auto download)
     parser.add_argument("--skip-source2", action="store_true",
                         help="Skip source2 (Kaggle dataset) entirely.")
     parser.add_argument("--skip-download", action="store_true",
@@ -301,11 +310,9 @@ def parse_args():
     parser.add_argument("--skip-enrich", action="store_true",
                         help="Skip Steam store enrichment for source2.")
     parser.add_argument("--kaggle-input", type=Path, default=None,
-                        help="Path to already-downloaded Kaggle CSV/dir (skips download).")
-    parser.add_argument("--kaggle-cache", type=Path, default=DEFAULT_KAGGLE_CACHE)
-    parser.add_argument("--source2-prepared-dir", type=Path, default=DEFAULT_PREPARED_DIR)
-    parser.add_argument("--source2-reviews", type=Path, default=SOURCE2_REVIEWS)
-    parser.add_argument("--source2-games-json", type=Path, default=SOURCE2_GAMES_JSON)
+                        help="Path to an already-downloaded Kaggle CSV/dir (skips download).")
+
+    # Kaggle prepare options
     parser.add_argument("--prepare-chunksize", type=int, default=200_000)
     parser.add_argument("--strict-length", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strict-count", action=argparse.BooleanOptionalAction, default=True)
@@ -314,15 +321,12 @@ def parse_args():
     parser.add_argument("--enrich-retry-sleep", type=float, default=10.0)
     parser.add_argument("--enrich-retries", type=int, default=5)
 
-    # Output
-    parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
-
     # Stage control
     parser.add_argument("--only", nargs="+", choices=PIPELINE_STAGES, default=None)
     parser.add_argument("--skip", nargs="+", choices=PIPELINE_STAGES, default=[])
     parser.add_argument("--skip-merge-games-json", action="store_true")
     parser.add_argument("--build-h5", action="store_true",
-                        help="After embedding, build VICReg_review/h5/*.h5.")
+                        help="After embedding, run build_review_h5.py → VICReg_review/h5/.")
     parser.add_argument("--overwrite", action="store_true")
 
     # Cleaning / filtering (note.txt spec)
@@ -346,6 +350,9 @@ def parse_args():
     parser.add_argument("--normalize", action="store_true")
 
     # H5
+    parser.add_argument("--h5", type=Path, default=None,
+                        help="Output H5 path (passed to build_review_h5.py --output-h5). "
+                             "Default: VICReg_review/h5/game_review_cleaned_3_sentences.h5")
     parser.add_argument("--h5-workers", type=int, default=2)
     parser.add_argument("--h5-shards", type=int, default=8)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -356,8 +363,20 @@ def parse_args():
 def main():
     args = parse_args()
     started = time.time()
-    workdir = args.workdir
-    workdir.mkdir(parents=True, exist_ok=True)
+
+    # Derive all sub-paths from the two top-level dirs
+    data_dir: Path = args.data_dir
+    embed_dir: Path = args.embed_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    embed_dir.mkdir(parents=True, exist_ok=True)
+
+    source1_dir  = data_dir / "Steam Games Metadata and Player Reviews (2020–2024"
+    source1_zip  = data_dir / "mendeley_steam_reviews.zip"
+    source2_dir  = data_dir / "kaggle_steam_reviews_prepared"
+    kaggle_cache = data_dir / "kagglehub_cache"
+    metadata_dir = data_dir / "metadata"
+    sentences_dir = data_dir / "sentences"
+    games_json_path = data_dir / "games.json"
 
     run = set(args.only) if args.only else set(PIPELINE_STAGES)
     run -= set(args.skip)
@@ -367,38 +386,40 @@ def main():
     games_json_sources: list[Path] = []
 
     if not args.skip_source1:
-        s1_ready = source1_done(args.source1_dir)
+        s1_ready = source1_done(source1_dir)
         if not s1_ready and not args.skip_source1_download:
-            s1_ready = download_source1(args.source1_dir, args.source1_zip_cache)
+            s1_ready = download_source1(source1_dir, source1_zip)
         if s1_ready:
-            s1 = args.source1_reviews
-            if s1.exists() and any(s1.glob("*.csv")):
-                review_dirs.append(s1)
-                if args.source1_games_json.exists():
-                    games_json_sources.append(args.source1_games_json)
+            s1_reviews = source1_dir / "Game Reviews"
+            if s1_reviews.exists() and any(s1_reviews.glob("*.csv")):
+                review_dirs.append(s1_reviews)
+            s1_games_json = source1_dir / "games.json"
+            if s1_games_json.exists():
+                games_json_sources.append(s1_games_json)
         else:
-            print(f"[warn] source1 not available, continuing without it.", flush=True)
+            print("[warn] source1 not available, continuing without it.", flush=True)
 
     # ------------------------------------------------------------------ source2
     if not args.skip_source2:
         s2_ready = False
         if not args.skip_download:
-            s2_ready = download_and_prepare_kaggle(args)
-        elif prepared_done(args.source2_prepared_dir):
+            s2_ready = download_and_prepare_kaggle(args, source2_dir, kaggle_cache)
+        elif prepared_done(source2_dir):
             s2_ready = True
         else:
             print(
-                f"[warn] source2 prepared data not found at {args.source2_prepared_dir}. "
+                f"[warn] source2 prepared data not found at {source2_dir}. "
                 "Run without --skip-download to fetch it.",
                 flush=True,
             )
 
         if s2_ready:
-            s2 = args.source2_reviews
-            if s2.exists() and any(s2.glob("*.csv")):
-                review_dirs.append(s2)
-                if args.source2_games_json.exists():
-                    games_json_sources.append(args.source2_games_json)
+            s2_reviews = source2_dir / "reviews"
+            if s2_reviews.exists() and any(s2_reviews.glob("*.csv")):
+                review_dirs.append(s2_reviews)
+            s2_games_json = source2_dir / "games.json"
+            if s2_games_json.exists():
+                games_json_sources.append(s2_games_json)
 
     if not review_dirs:
         raise SystemExit(
@@ -409,7 +430,8 @@ def main():
 
     print(
         f"=== unified game-review build ===\n"
-        f"workdir  : {workdir}\n"
+        f"data-dir : {data_dir}\n"
+        f"embed-dir: {embed_dir}\n"
         f"sources  : {[str(p) for p in review_dirs]}\n"
         f"stages   : {sorted(run)}\n"
         f"backend  : {args.backend}\n",
@@ -419,12 +441,11 @@ def main():
     # ------------------------------------------------------------------ games.json
     if not args.skip_merge_games_json:
         print("\n--- merge games.json ---", flush=True)
-        merge_games_json(games_json_sources, workdir / "games.json", args.overwrite)
+        merge_games_json(games_json_sources, games_json_path, args.overwrite)
 
-    games_json = workdir / "games.json"
-    if not games_json.exists():
+    if not games_json_path.exists():
         raise SystemExit(
-            f"games.json not found at {games_json}. "
+            f"games.json not found at {games_json_path}. "
             "Run without --skip-merge-games-json or supply it manually."
         )
 
@@ -434,8 +455,8 @@ def main():
         from build_metadata import build_metadata
         build_metadata(
             reviews_dirs=review_dirs,
-            games_json=games_json,
-            output_dir=workdir / "metadata",
+            games_json=games_json_path,
+            output_dir=metadata_dir,
             min_length=args.min_length,
             min_count=args.min_count,
             with_meta=True,
@@ -447,8 +468,8 @@ def main():
         print("\n--- stage 2/3: split (SaT sentence splitter) ---", flush=True)
         from split_data import split_data
         split_data(
-            input_dir=workdir / "metadata",
-            output_dir=workdir / "sentences",
+            input_dir=metadata_dir,
+            output_dir=sentences_dir,
             model=args.split_model,
             device=args.split_device,
             chunk_size=args.chunk_size,
@@ -460,8 +481,8 @@ def main():
         print("\n--- stage 3/3: embed (Qwen3 vectors) ---", flush=True)
         from embedding_data import embed_data
         embed_data(
-            input_dir=workdir / "sentences",
-            output_dir=workdir / "embedded",
+            input_dir=sentences_dir,
+            output_dir=embed_dir,
             backend=args.backend,
             overwrite=args.overwrite,
             local_model=args.local_model,
@@ -476,10 +497,10 @@ def main():
     # ------------------------------------------------------------------ H5 build
     if args.build_h5:
         print("\n--- H5: shard + merge -> VICReg_review/h5/ ---", flush=True)
-        run_h5_build(args, workdir)
+        run_h5_build(args, embed_dir, games_json_path)
 
     elapsed = time.time() - started
-    print(f"\n=== build done in {elapsed:.0f}s. workdir={workdir} ===", flush=True)
+    print(f"\n=== build done in {elapsed:.0f}s. data-dir={data_dir} embed-dir={embed_dir} ===", flush=True)
 
 
 if __name__ == "__main__":
