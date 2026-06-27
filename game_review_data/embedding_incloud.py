@@ -433,6 +433,8 @@ def embed_incloud(
     the manifest. Order is therefore identical to ``text_h5.h5`` regardless of
     the in-shard length sort, and a killed run resumes at the last finished shard.
     """
+    import gc
+
     import h5py
     import torch
 
@@ -528,6 +530,12 @@ def embed_incloud(
             out["vectors"][start:end] = buf
             out.flush()
         del buf
+        # Release this shard's cached GPU blocks back to the allocator so batch-shape
+        # variation across shards can't fragment into an eventual OOM. The model stays
+        # resident; only the freed activation cache is returned.
+        if str(embedder.device).startswith("cuda"):
+            gc.collect()
+            torch.cuda.empty_cache()
         shard["status"] = "done"
         atomic_json_write(manifest, manifest_file)
         elapsed = time.time() - run_started
