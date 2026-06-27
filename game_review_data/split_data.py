@@ -74,7 +74,9 @@ def split_reviews_into_mapping(reviews, splitter, chunk_size, device):
     sentence_count = 0
     for start in range(0, len(normalized), chunk_size):
         chunk = normalized[start : start + chunk_size]
-        for local_index, review_sentences in enumerate(splitter.split(chunk)):
+        for local_index, review_sentences in enumerate(
+            split_chunk_with_fallback(chunk, splitter, start, device)
+        ):
             review_id = start + local_index
             sentences = {}
             sid = 0
@@ -90,6 +92,41 @@ def split_reviews_into_mapping(reviews, splitter, chunk_size, device):
     return mapping, sentence_count
 
 
+def regex_sentence_fallback(text):
+    parts = re.split(r"(?<=[.!?。！？])\s+", normalize_text(text))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def split_chunk_with_fallback(chunk, splitter, start_index, device):
+    try:
+        return list(splitter.split(chunk))
+    except AssertionError as exc:
+        reason = f"SaT assertion: {exc}"
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        reason = f"CUDA OOM: {exc}"
+
+    _clear_cuda_cache(device)
+    if len(chunk) > 1:
+        mid = len(chunk) // 2
+        print(
+            f"  [warn] split chunk starting review {start_index} failed ({reason}); "
+            f"retrying as {mid}+{len(chunk) - mid}",
+            flush=True,
+        )
+        return (
+            split_chunk_with_fallback(chunk[:mid], splitter, start_index, device)
+            + split_chunk_with_fallback(chunk[mid:], splitter, start_index + mid, device)
+        )
+
+    print(
+        f"  [warn] review {start_index} failed SaT split ({reason}); using regex fallback",
+        flush=True,
+    )
+    return [regex_sentence_fallback(chunk[0])]
+
+
 def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
                chunk_size=DEFAULT_CHUNK_SIZE, overwrite=False, splitter=None):
     input_dir = Path(input_dir)
@@ -103,17 +140,21 @@ def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
     if splitter is None:
         splitter = load_splitter(model, device)
 
-    print(f"split_data: {len(input_files)} files, model={model}, device={device} -> {output_dir}")
+    print(f"split_data: {len(input_files)} files, model={model}, device={device} -> {output_dir}", flush=True)
+    skipped_existing = 0
     for file_index, input_path in enumerate(input_files, start=1):
         output_path = output_dir / input_path.name
         if output_path.exists() and not overwrite:
-            print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (exists)")
+            skipped_existing += 1
             continue
+        if skipped_existing:
+            print(f"skip existing sentence JSON files: {skipped_existing}", flush=True)
+            skipped_existing = 0
 
         with input_path.open("r", encoding="utf-8") as file:
             reviews = json.load(file)
         if not isinstance(reviews, list):
-            print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (not a list)")
+            print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (not a list)", flush=True)
             continue
 
         mapping, sentence_count = split_reviews_into_mapping(reviews, splitter, chunk_size, device)
@@ -125,9 +166,12 @@ def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
 
         print(
             f"[{file_index}/{len(input_files)}] {input_path.name}: "
-            f"{len(reviews)} reviews -> {len(mapping)} non-empty, {sentence_count} sentences"
+            f"{len(reviews)} reviews -> {len(mapping)} non-empty, {sentence_count} sentences",
+            flush=True,
         )
-    print(f"Done. Sentence JSON written to {output_dir}")
+    if skipped_existing:
+        print(f"skip existing sentence JSON files: {skipped_existing}", flush=True)
+    print(f"Done. Sentence JSON written to {output_dir}", flush=True)
 
 
 def parse_args():

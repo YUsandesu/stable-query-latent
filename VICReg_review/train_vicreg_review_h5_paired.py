@@ -50,6 +50,7 @@ from VICReg_review.train_vicreg_review_h5 import (  # noqa: E402
     restore_rng_state,
     run_dual_probe,
     run_training_batch,
+    should_run_probe,
     write_history,
     write_manifest,
     atomic_torch_save,
@@ -313,7 +314,7 @@ def train(args) -> None:
                     state["global_step"],
                     averaged,
                 )
-                if args.probe_every > 0 and (epoch % args.probe_every == 0 or epoch == args.epochs):
+                if should_run_probe(epoch, arm_args):
                     run_dual_probe(
                         state["model"],
                         arm_args,
@@ -375,8 +376,23 @@ def parse_args():
     parser.add_argument("--nogrl-manifest-json", default=str(DEFAULT_HEADS_DIR / "paired_nogrl_manifest.json"))
     parser.add_argument("--nogrl-probe-history-tsv", default=str(DEFAULT_HEADS_DIR / "paired_nogrl_dual_probe.tsv"))
     parser.add_argument("--probe-every", type=int, default=0)
+    parser.add_argument("--probe-start-epoch", type=int, default=3)
     parser.add_argument("--probe-feature-views", type=int, default=2)
     parser.add_argument("--probe-folds", type=int, default=5)
+    parser.add_argument("--probe-sample-fraction", type=float, default=0.6)
+    parser.add_argument("--text-variant-dir", default=None)
+    parser.add_argument("--text-variant-cache", default=None)
+    parser.add_argument("--rebuild-text-variant-cache", action="store_true")
+    parser.add_argument("--text-variant-feature-views", type=int, default=4)
+    parser.add_argument("--text-variant-sample-fraction", type=float, default=1.0)
+    parser.add_argument("--text-variant-local-model", default="Qwen/Qwen3-Embedding-0.6B")
+    parser.add_argument("--text-variant-embed-batch-size", type=int, default=32)
+    parser.add_argument("--text-variant-max-sentences", type=int, default=4096)
+    parser.add_argument("--tag-text-split-json", default=None)
+    parser.add_argument("--tag-text-train-frac", type=float, default=0.7)
+    parser.add_argument("--tag-text-val-frac", type=float, default=0.15)
+    parser.add_argument("--tag-text-split-seed", type=int, default=20260627)
+    parser.add_argument("--tag-text-threshold-steps", type=int, default=33)
     parser.add_argument("--no-save", action="store_true")
 
     parser.add_argument("--epochs", type=int, default=100)

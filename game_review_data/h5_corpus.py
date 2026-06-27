@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -40,7 +41,39 @@ NEGATIVE_VALUE = "not recommended"
 
 def atomic_h5_path(path: Path) -> Path:
     path = Path(path)
-    return path.with_name(path.name + ".tmp")
+    return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+
+
+def unlink_with_retry(path: Path, attempts: int = 120, delay: float = 1.0) -> None:
+    path = Path(path)
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
+
+
+def replace_with_retry(source: Path, target: Path, attempts: int = 120, delay: float = 1.0) -> None:
+    source = Path(source)
+    target = Path(target)
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
+
+
+def best_effort_unlink(path: Path) -> None:
+    try:
+        unlink_with_retry(path, attempts=5, delay=0.2)
+    except PermissionError:
+        pass
 
 
 def atomic_json_write(payload: dict, path: Path) -> None:
@@ -49,9 +82,9 @@ def atomic_json_write(payload: dict, path: Path) -> None:
     tmp_path = path.with_name(path.name + ".tmp")
     try:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        replace_with_retry(tmp_path, path)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        best_effort_unlink(tmp_path)
         raise
 
 
@@ -447,7 +480,7 @@ def build_text_h5(
     games = load_games_json(games_json)
     output_h5.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = atomic_h5_path(output_h5)
-    tmp_path.unlink(missing_ok=True)
+    unlink_with_retry(tmp_path)
     started = time.time()
     chunk_sentences = max(1, min(int(chunk_rows), total_sentences))
     chunk_reviews = max(1, min(int(chunk_rows), total_reviews))
@@ -573,7 +606,7 @@ def build_text_h5(
                 ensure_ascii=False,
             )
 
-        tmp_path.replace(output_h5)
+        replace_with_retry(tmp_path, output_h5)
         write_text_h5_manifest(
             output_h5,
             expected,
@@ -585,7 +618,7 @@ def build_text_h5(
             status="written",
         )
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        best_effort_unlink(tmp_path)
         raise
 
     print(
@@ -642,7 +675,7 @@ def embed_text_h5(
 
     output_h5.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = atomic_h5_path(output_h5)
-    tmp_path.unlink(missing_ok=True)
+    unlink_with_retry(tmp_path)
     vector_dtype = np.dtype(dtype)
     started = time.time()
 
@@ -704,9 +737,9 @@ def embed_text_h5(
             out.attrs["dtype"] = str(vector_dtype)
             out.attrs["sentences"] = total_sentences
 
-        tmp_path.replace(output_h5)
+        replace_with_retry(tmp_path, output_h5)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        best_effort_unlink(tmp_path)
         raise
 
     print(

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -1551,37 +1552,116 @@ def write_manifest(path, status, args, epoch, step, metrics=None, error=None):
     atomic_text_write(json.dumps(payload, ensure_ascii=False, indent=2), path)
 
 
-def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
-    """Tag + PXI dual-probe validation on the current encoder (frozen for the call).
+def should_run_probe(epoch: int, args) -> bool:
+    every = int(getattr(args, "probe_every", 0))
+    if every <= 0:
+        return False
+    start = max(1, int(getattr(args, "probe_start_epoch", 1)))
+    return epoch >= start and (epoch - start) % every == 0
 
-    Lazy-imported so there is no import cycle with dual_probe -> train_tag_probe ->
-    this module. Failures are caught: a probe must never kill a training run.
+
+def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
+    """Periodic full validation on the current encoder.
+
+    This replaces the old dual_probe path. It measures the sweep tasks we care
+    about during training: sentiment probe, recommendation probe, held-out
+    anchor TAG generalization, and real-text TAG/cosine behavior. Failures are
+    caught so a probe never kills a training run.
     """
     try:
-        from VICReg_review import dual_probe
-    except Exception:  # fall back to a path import when not run as a package
-        import dual_probe  # type: ignore
+        from VICReg_review.train_tag_probe import extract_features, pool_features
+        from VICReg_review.run_data_view_sweep import recommendation_probe, sentiment_r2
+        from VICReg_review import text_variant_eval
+    except Exception:
+        from train_tag_probe import extract_features, pool_features  # type: ignore
+        from run_data_view_sweep import recommendation_probe, sentiment_r2  # type: ignore
+        import text_variant_eval  # type: ignore
     try:
-        metrics = dual_probe.probe_encoder(
-            model, args.input_h5, device,
-            amp=args.amp and device.type == "cuda",
-            feature_views=args.probe_feature_views,
-            sample_fraction=args.sample_fraction,
-            folds=args.probe_folds,
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                feats, names = extract_features(
+                    model,
+                    args.input_h5,
+                    args.probe_sample_fraction,
+                    args.probe_feature_views,
+                    args.seed,
+                    args.cache_dtype,
+                    device,
+                    args.amp and device.type == "cuda",
+                )
+        finally:
+            if was_training:
+                model.train()
+
+        eval_dir = Path(args.probe_history_tsv).resolve().parent
+        eval_args = SimpleNamespace(
+            h5=Path(args.input_h5),
+            out_dir=eval_dir,
+            device=args.device,
             seed=args.seed,
+            probe_folds=args.probe_folds,
+            text_variant_dir=args.text_variant_dir,
+            text_variant_cache=args.text_variant_cache,
+            rebuild_text_variant_cache=args.rebuild_text_variant_cache,
+            text_variant_feature_views=args.text_variant_feature_views,
+            text_variant_sample_fraction=args.text_variant_sample_fraction,
+            tag_text_split_json=args.tag_text_split_json,
+            tag_text_train_frac=args.tag_text_train_frac,
+            tag_text_val_frac=args.tag_text_val_frac,
+            tag_text_split_seed=args.tag_text_split_seed,
+            tag_text_threshold_steps=args.tag_text_threshold_steps,
+            local_model=args.text_variant_local_model,
+            embed_batch_size=args.text_variant_embed_batch_size,
+            max_text_sentences=args.text_variant_max_sentences,
+            eval_feature_views=args.text_variant_feature_views,
+            eval_sample_fraction=args.text_variant_sample_fraction,
+            amp_eval=args.amp and device.type == "cuda",
         )
+        X_stats = pool_features(feats, "stats").astype(np.float32)
+        report = {
+            "epoch": epoch,
+            "global_step": global_step,
+            "sentiment_probe": sentiment_r2(eval_args, X_stats, names),
+            "recommendation_probe": recommendation_probe(eval_args, X_stats, names),
+            "text_variant_eval": text_variant_eval.evaluate(eval_args, model, feats, names, eval_dir),
+        }
     except BaseException as exc:  # noqa: BLE001
         print(f"[probe] epoch={epoch} skipped: {type(exc).__name__}: {exc}", flush=True)
         return
-    row = {"epoch": epoch, "global_step": global_step, **metrics}
+
+    text_eval = report.get("text_variant_eval") or {}
+    anchor_test = (text_eval.get("tag_generalization") or {}).get("anchor_test") or {}
+    real_text_tag = text_eval.get("real_text_tag") or {}
+    sentiment = report.get("sentiment_probe") or {}
+    reco = report.get("recommendation_probe") or {}
+    row = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "sentiment_r2": sentiment.get("r2"),
+        "sentiment_pearson": sentiment.get("pearson"),
+        "recommendation_pearson": reco.get("pearson_mean"),
+        "recommendation_mae": reco.get("mae_mean"),
+        "anchor_test_tag_micro_f1": anchor_test.get("micro_f1"),
+        "anchor_test_tag_recall": anchor_test.get("recall"),
+    }
+    for variant in ("positive", "neutral", "negative"):
+        payload = real_text_tag.get(variant) or {}
+        metrics = payload.get("variant") or {}
+        row[f"{variant}_tag_micro_f1"] = metrics.get("micro_f1")
+        row[f"{variant}_tag_recall"] = metrics.get("recall")
+        row[f"{variant}_drop_micro_f1"] = payload.get("drop_micro_f1")
+        row[f"{variant}_drop_recall"] = payload.get("drop_recall")
     probe_rows.append(row)
     write_history(probe_rows, args.probe_history_tsv)
+    jsonl_path = Path(args.probe_history_tsv).with_suffix(".jsonl")
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(report, ensure_ascii=False) + "\n")
     print(
-        f"[probe] epoch={epoch} tag_content_f1={metrics['tag_content_f1']:.3f} "
-        f"tag_subj_f1={metrics['tag_subjective_f1']:.3f} selectivity={metrics['tag_selectivity']:+.3f} "
-        f"code_sent_r2={metrics['code_sentiment_r2']:.3f} "
-        f"pxi_func_f1={metrics['pxi_func_f1']:.3f} pxi_psych_f1={metrics['pxi_psych_f1']:.3f} "
-        f"pxi_delta={metrics['pxi_delta']:+.3f} (n_pxi={int(metrics['n_pxi'])})",
+        f"[probe] epoch={epoch} anchor_tag_f1={row['anchor_test_tag_micro_f1']} "
+        f"sent_r2={row['sentiment_r2']} reco_pearson={row['recommendation_pearson']}",
         flush=True,
     )
 
@@ -1834,7 +1914,7 @@ def train(args):
             write_history(history_rows, args.history_tsv)
             write_manifest(args.manifest_json, "running", args, epoch, global_step, averaged)
 
-            if args.probe_every > 0 and (epoch % args.probe_every == 0 or epoch == args.epochs):
+            if should_run_probe(epoch, args):
                 run_dual_probe(model, args, device, epoch, global_step, probe_rows)
 
         write_manifest(args.manifest_json, "done", args, args.epochs, global_step, last_metrics)
@@ -1866,12 +1946,28 @@ def parse_args():
     parser.add_argument("--history-tsv", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_history.tsv"))
     parser.add_argument("--manifest-json", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_manifest.json"))
     parser.add_argument("--probe-every", type=int, default=1,
-                        help="Run the tag+PXI dual probe every N epochs (and on the last epoch) to "
-                             "measure probe accuracy during training. 0 = off (e.g. for smoke tests).")
+                        help="Run the aligned full probe every N epochs after --probe-start-epoch. "
+                             "0 = off (e.g. for smoke tests).")
+    parser.add_argument("--probe-start-epoch", type=int, default=3,
+                        help="First epoch that may run the periodic full probe.")
     parser.add_argument("--probe-feature-views", type=int, default=2,
                         help="Views per game when extracting probe features (fewer = faster probe).")
     parser.add_argument("--probe-folds", type=int, default=5)
+    parser.add_argument("--probe-sample-fraction", type=float, default=0.6)
     parser.add_argument("--probe-history-tsv", default=str(DEFAULT_HEADS_DIR / "dual_probe_history.tsv"))
+    parser.add_argument("--text-variant-dir", default=None)
+    parser.add_argument("--text-variant-cache", default=None)
+    parser.add_argument("--rebuild-text-variant-cache", action="store_true")
+    parser.add_argument("--text-variant-feature-views", type=int, default=4)
+    parser.add_argument("--text-variant-sample-fraction", type=float, default=1.0)
+    parser.add_argument("--text-variant-local-model", default="Qwen/Qwen3-Embedding-0.6B")
+    parser.add_argument("--text-variant-embed-batch-size", type=int, default=32)
+    parser.add_argument("--text-variant-max-sentences", type=int, default=4096)
+    parser.add_argument("--tag-text-split-json", default=None)
+    parser.add_argument("--tag-text-train-frac", type=float, default=0.7)
+    parser.add_argument("--tag-text-val-frac", type=float, default=0.15)
+    parser.add_argument("--tag-text-split-seed", type=int, default=20260627)
+    parser.add_argument("--tag-text-threshold-steps", type=int, default=33)
     parser.add_argument("--smoke-result-json", default=str(DEFAULT_SMOKE_RESULT))
     parser.add_argument("--resume-checkpoint", default=None,
                         help="Resume model, adversary, optimizer, epoch, and global step from this checkpoint.")

@@ -720,6 +720,24 @@ def identity_metrics(args, checkpoint: Path, feats: np.ndarray, names: list[str]
     }
 
 
+def text_variant_metrics(args, checkpoint: Path, combo_dir: Path, feats: np.ndarray, names: list[str]) -> dict:
+    text_variant_dir = getattr(args, "text_variant_dir", None)
+    if not text_variant_dir:
+        return {"status": "disabled"}
+    if not Path(text_variant_dir).exists():
+        return {"status": "skipped", "reason": f"text variant dir not found: {text_variant_dir}"}
+    try:
+        from VICReg_review import text_variant_eval
+
+        device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+        with h5py.File(args.h5, "r") as h5:
+            input_dim = int(h5.attrs["input_dim"])
+        encoder, _, _, _ = load_frozen_encoder(checkpoint, input_dim, device)
+        return text_variant_eval.evaluate(args, encoder, feats, names, combo_dir)
+    except BaseException as exc:  # noqa: BLE001 - eval failure should not kill the sweep
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
 def evaluate_combo_from_features(
     args,
     checkpoint: Path,
@@ -749,6 +767,7 @@ def evaluate_combo_from_features(
         "sentiment_probe": sentiment_r2(args, X_stats, feature_names),
         "recommendation_probe": recommendation_probe(args, X_stats, feature_names),
         "identity": identity_metrics(args, checkpoint, feats, feature_names, raw_cache, text_cache),
+        "text_variant_eval": text_variant_metrics(args, checkpoint, combo_dir, feats, feature_names),
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     atomic_json_write(report, report_path)
