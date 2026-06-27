@@ -279,9 +279,8 @@ Expander 投影本身的 PR 只有 12.20，不是我们下游要用的空间；
 不过这里要非常谨慎：293 个候选里进前 100，本身不是强指标，
 真正重要的是是不是能稳定回到自己的 review centroid。
 
-这次合法训练里，BG3、Cyberpunk 的官方描述，以及 Cyberpunk/AO 的长文本改写，
+这次合法训练里，Cyberpunk 的官方描述，以及 Cyberpunk/AO 的长文本改写，
 在绝对测试集上表现如下：
-BG3 description = 1/293；
 Cyberpunk description = 1/293；
 Cyberpunk neutral / positive / negative = 1 / 1 / 4；
 Across the Obelisk neutral / positive / negative = 1 / 1 / 1。
@@ -393,7 +392,7 @@ sentiment retention 只有 0.349。
 这里的意思是：内容大体保住了，情感轴被明显压弱。
 
 第二，低秩与身份召回：
-最终模型把游戏质心 PR 提到 26.62，并把 BG3、Cyberpunk description / neutral / positive、AO neutral / positive / negative 都拉回到 rank 1。
+最终模型把游戏质心 PR 提到 26.62，并把 Cyberpunk description / neutral / positive、AO neutral / positive / negative 都拉回到 rank 1。
 Cyberpunk negative 掉到 4，但这仍然远好于旧版接近末位的失败。
 这次的结论是：完整描述通路被明显修复了，但 negative 风格仍然是最难的一支。
 

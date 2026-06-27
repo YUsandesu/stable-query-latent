@@ -19,7 +19,7 @@ The latest model is no longer a plain slot-level VICReg encoder. It uses:
 |---|---:|
 | compact centroid Participation Ratio | 26.67 |
 | z-scored compact centroid PR | 26.64 |
-| BG3 / Cyberpunk / AO diagnostic text ranks | 1 / 1 / 1 |
+| Cyberpunk / AO diagnostic text ranks | 1 / 1 |
 | TAP tag micro-F1, flatten pool | 0.6938 |
 | content retention vs raw | 0.888 |
 | sentiment R² retention vs raw | 0.349 |
@@ -29,8 +29,8 @@ The latest model is no longer a plain slot-level VICReg encoder. It uses:
 
 - Content is still readable.
 - Sentiment and recommendation-rate linear readouts are strongly suppressed.
-- Identity retrieval on the aligned diagnostic texts is rank-1 across BG3,
-  Cyberpunk, and Across the Obelisk, but those long-text variants were included in
+- Identity retrieval on the aligned diagnostic texts is rank-1 across Cyberpunk
+  and Across the Obelisk, but those long-text variants were included in
   the description-alignment cache, so this should be read as an aligned target
   success rather than pure zero-shot generalization.
 

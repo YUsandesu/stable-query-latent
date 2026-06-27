@@ -20,7 +20,7 @@ full-text description alignment, and a game-level recommendation-rate decorrelat
 |---|---:|
 | compact centroid Participation Ratio | 26.67 |
 | z-scored compact centroid PR | 26.64 |
-| BG3 / Cyberpunk / AO diagnostic text ranks | 1 / 1 / 1 |
+| Cyberpunk / AO diagnostic text ranks | 1 / 1 |
 | TAP tag micro-F1, flatten pool | 0.6938 |
 | content retention vs raw | 0.888 |
 | sentiment R² retention vs raw | 0.349 |
@@ -30,8 +30,8 @@ Interpretation:
 
 - The tag probe is still healthy, but the stronger result is selectivity.
 - Content survives; sentiment and recommendation-rate linear readouts are both strongly reduced.
-- The identity retrieval success on the diagnostic text set is now rank-1 across BG3,
-  Cyberpunk, and Across the Obelisk, but that includes the long-text cases used in the
+- The identity retrieval success on the diagnostic text set is now rank-1 across Cyberpunk
+  and Across the Obelisk, but that includes the long-text cases used in the
   alignment cache, so it is best read as a trained alignment success rather than pure
   zero-shot retrieval.
 - Historical sections below describe earlier checkpoint families (`centroid64_grl` and
@@ -53,7 +53,6 @@ Final checkpoint:
 | Diagnostic | Previous collapsed 18-d code | New 64-d game-centroid code |
 |---|---:|---:|
 | compact game-vector Participation Ratio | ~2 (failure case) | **15.97** |
-| Baldur's Gate 3 identity rank | not measured in old table | **43 / 293** |
 | Cyberpunk 2077 description rank | old Cyberpunk text ranks 273-288 | **25 / 293** |
 | Cyberpunk 2077 neutral / positive / negative ranks | 288 / 273 / 284 | **41 / 41 / 12** |
 | Across the Obelisk neutral / positive / negative ranks | 1 / 8 / 24 | 26 / 27 / 29 (**regression**) |
@@ -70,7 +69,7 @@ Notes:
 - TAP labels in the current H5 are 23 coarse non-subjective labels, so the
   selectivity probe reports `subjective=nan`; the meaningful checks are content
   retention and SST sentiment R² retention.
-- The final checkpoint improves the collapsed Cyberpunk/BG3-style failure mode
+- The final checkpoint improves the collapsed Cyberpunk-style failure mode
   and restores compact centroid PR, while keeping tag F1 essentially unchanged.
   It is **not** universally better for identity retrieval: Across the Obelisk
   regresses from the old flattened-identity ranks `1 / 8 / 24` to `26 / 27 / 29`

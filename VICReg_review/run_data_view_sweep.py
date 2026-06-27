@@ -982,6 +982,8 @@ def export_raw_detail_tables(args, rows: list[dict]) -> None:
 
         sentiment = report.get("sentiment_probe") or {}
         reco = report.get("recommendation_probe") or {}
+        text_eval = report.get("text_variant_eval") or {}
+        tag_generalization = text_eval.get("tag_generalization") or {}
         probe_rows.append({
             **base,
             "tag_micro_f1": tag.get("micro_f1"),
@@ -995,6 +997,12 @@ def export_raw_detail_tables(args, rows: list[dict]) -> None:
             "sentiment_r2": sentiment.get("r2"),
             "sentiment_pearson": sentiment.get("pearson"),
             "sentiment_n": sentiment.get("n"),
+            "text_tag_anchor_train_micro_f1": (tag_generalization.get("anchor_train") or {}).get("micro_f1"),
+            "text_tag_anchor_train_recall": (tag_generalization.get("anchor_train") or {}).get("recall"),
+            "text_tag_anchor_val_micro_f1": (tag_generalization.get("anchor_val") or {}).get("micro_f1"),
+            "text_tag_anchor_val_recall": (tag_generalization.get("anchor_val") or {}).get("recall"),
+            "text_tag_anchor_test_micro_f1": (tag_generalization.get("anchor_test") or {}).get("micro_f1"),
+            "text_tag_anchor_test_recall": (tag_generalization.get("anchor_test") or {}).get("recall"),
         })
         reco_rows.append({**base, **reco})
 

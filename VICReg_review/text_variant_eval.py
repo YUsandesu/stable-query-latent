@@ -4,8 +4,8 @@ Protocol:
 * The H5/game feature is the anchor distribution: "description + reviews".
 * Train a fresh Ridge TAG probe on anchor features for train games.
 * Select alpha and a global decision threshold on anchor validation games.
-* First evaluate held-out anchor features to measure normal test-set TAG
-  generalization.
+* First evaluate anchor features on train/val/test splits to measure normal TAG
+  fit/generalization behavior.
 * Then evaluate every available positive/neutral/negative/noname real-text
   variant with the same fixed probe to measure text generalization, sentiment
   impact, and whether identity depends on proper-name shortcuts.
@@ -317,17 +317,28 @@ def evaluate(args, encoder, feats: np.ndarray, feature_names: list[str], combo_d
     y, tags = align_labels(h5_path, feature_names)
     split_path = Path(getattr(args, "tag_text_split_json", "") or (Path(args.out_dir) / "tag_text_eval_split.json"))
     split = make_or_load_split(split_path, feature_names, args)
-    scaler, ridge, alpha, threshold, val_metrics = train_anchor_ridge(args, anchor, y, name_to_index, split)
+    scaler, ridge, alpha, threshold, _val_metrics = train_anchor_ridge(args, anchor, y, name_to_index, split)
 
-    test_names = [n for n in split["test"] if n in name_to_index]
-    test_idx = np.asarray([name_to_index[n] for n in test_names], dtype=np.int64)
-    if test_idx.size == 0:
+    def split_indices(split_name: str) -> np.ndarray:
+        return np.asarray([name_to_index[n] for n in split.get(split_name, []) if n in name_to_index], dtype=np.int64)
+
+    tag_generalization = {}
+    for split_name in ("train", "val", "test"):
+        idx = split_indices(split_name)
+        key = f"anchor_{split_name}"
+        if idx.size == 0:
+            tag_generalization[key] = {
+                "n_games": 0,
+                "micro_f1": float("nan"),
+                "precision": float("nan"),
+                "recall": float("nan"),
+            }
+            continue
+        split_scores = ridge.predict(scaler.transform(anchor[idx]))
+        tag_generalization[key] = evaluate_scores(y[idx], split_scores, threshold)
+
+    if tag_generalization["anchor_test"]["n_games"] == 0:
         return {"status": "skipped", "reason": "empty text TAG test split"}
-
-    anchor_test_scores = ridge.predict(scaler.transform(anchor[test_idx]))
-    tag_generalization = {
-        "anchor_test": evaluate_scores(y[test_idx], anchor_test_scores, threshold),
-    }
     real_text_tag = {}
     cosine_rows = []
     anchor_by_name = {feature_names[i]: anchor[i] for i in range(len(feature_names))}
@@ -404,7 +415,7 @@ def evaluate(args, encoder, feats: np.ndarray, feature_names: list[str], combo_d
         "embedding_cache": str(cache_path),
         "ridge_alpha": float(alpha),
         "ridge_threshold": float(threshold),
-        "val_anchor": val_metrics,
+        "val_anchor": tag_generalization["anchor_val"],
         "tag_generalization": tag_generalization,
         "real_text_tag": real_text_tag,
         "sentiment_effect": {

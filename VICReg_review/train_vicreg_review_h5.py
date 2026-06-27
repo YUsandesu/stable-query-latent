@@ -1328,6 +1328,8 @@ def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
         return
 
     text_eval = report.get("text_variant_eval") or {}
+    anchor_train = (text_eval.get("tag_generalization") or {}).get("anchor_train") or {}
+    anchor_val = (text_eval.get("tag_generalization") or {}).get("anchor_val") or {}
     anchor_test = (text_eval.get("tag_generalization") or {}).get("anchor_test") or {}
     real_text_tag = text_eval.get("real_text_tag") or {}
     sentiment = report.get("sentiment_probe") or {}
@@ -1339,6 +1341,10 @@ def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
         "sentiment_pearson": sentiment.get("pearson"),
         "recommendation_pearson": reco.get("pearson_mean"),
         "recommendation_mae": reco.get("mae_mean"),
+        "anchor_train_tag_micro_f1": anchor_train.get("micro_f1"),
+        "anchor_train_tag_recall": anchor_train.get("recall"),
+        "anchor_val_tag_micro_f1": anchor_val.get("micro_f1"),
+        "anchor_val_tag_recall": anchor_val.get("recall"),
         "anchor_test_tag_micro_f1": anchor_test.get("micro_f1"),
         "anchor_test_tag_recall": anchor_test.get("recall"),
     }
@@ -1356,7 +1362,8 @@ def run_dual_probe(model, args, device, epoch, global_step, probe_rows):
     with jsonl_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(report, ensure_ascii=False) + "\n")
     print(
-        f"[probe] epoch={epoch} anchor_tag_f1={row['anchor_test_tag_micro_f1']} "
+        f"[probe] epoch={epoch} anchor_train_f1={row['anchor_train_tag_micro_f1']} "
+        f"anchor_test_f1={row['anchor_test_tag_micro_f1']} "
         f"sent_r2={row['sentiment_r2']} reco_pearson={row['recommendation_pearson']}",
         flush=True,
     )
