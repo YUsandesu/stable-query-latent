@@ -2,8 +2,15 @@ numpy
 pandas
 h5py
 requests
-PyQt6
-sentence-transformers
 torch
 transformers>=4.51.0
 wtpsplit
+sentence-transformers
+scikit-learn
+kagglehub
+matplotlib
+PyQt6
+bertopic
+hdbscan
+umap-learn
+ijson
