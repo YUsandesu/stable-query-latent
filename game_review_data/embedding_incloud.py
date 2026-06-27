@@ -23,6 +23,7 @@ disk->disk and targets the cloud TEI endpoint). Use this one on the A100 box.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -42,32 +43,34 @@ try:
         DEFAULT_EMBEDDING_H5,
         DEFAULT_TEXT_H5,
         EMBEDDING_H5_SCHEMA,
-        atomic_h5_path,
+        atomic_json_write,
         best_effort_unlink,
         compression_kwargs,
         copy_text_h5,
         decode_text,
         replace_with_retry,
-        unlink_with_retry,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from h5_corpus import (
         DEFAULT_EMBEDDING_H5,
         DEFAULT_TEXT_H5,
         EMBEDDING_H5_SCHEMA,
-        atomic_h5_path,
+        atomic_json_write,
         best_effort_unlink,
         compression_kwargs,
         copy_text_h5,
         decode_text,
         replace_with_retry,
-        unlink_with_retry,
     )
 
 DEFAULT_INPUT_H5 = DEFAULT_TEXT_H5
 DEFAULT_OUTPUT_H5 = DEFAULT_EMBEDDING_H5
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_BACKEND = "local_incloud"
+DEFAULT_SHARD_SIZE = 2_000_000
+MANIFEST_SCHEMA = "embedding_incloud.manifest.v1"
+# Rough chars-per-token used only to size token-budget batches from char length.
+CHARS_PER_TOKEN_EST = 4
 
 
 class FatGpuEmbedder:
@@ -147,86 +150,94 @@ def load_all_texts(input_h5: Path):
     return texts
 
 
-def length_sorted_batches(texts, batch_size, sort=True):
-    """Yield lists of original indices, batched and (optionally) length-sorted.
+def manifest_path_for(output_h5: Path) -> Path:
+    output_h5 = Path(output_h5)
+    return output_h5.with_name(output_h5.name + ".incloud_manifest.json")
 
-    Sorting descending by character length keeps each batch's texts close in
-    length, so dynamic padding adds almost no wasted tokens.
+
+def working_path_for(output_h5: Path) -> Path:
+    """Stable (non-PID) working-file name so it survives restarts for resume."""
+    output_h5 = Path(output_h5)
+    return output_h5.with_name(output_h5.name + ".incloud.partial.h5")
+
+
+def plan_shards(total: int, shard_size: int) -> list[dict]:
+    """Tile [0, total) into contiguous, non-overlapping shards."""
+    shards: list[dict] = []
+    start = 0
+    shard_id = 0
+    while start < total:
+        end = min(start + shard_size, total)
+        shards.append({"id": shard_id, "start": start, "end": end, "rows": end - start, "status": "pending"})
+        start = end
+        shard_id += 1
+    return shards
+
+
+def build_batches(order, texts, batch_size, token_budget, max_batch, max_length):
+    """Group sorted indices into batches.
+
+    With ``token_budget > 0`` (and a length-sorted ``order``), pack each batch to
+    a roughly fixed total token count: the head element (longest, since sorted
+    descending) sets the padded width, so ``k = char_budget // head_len`` keeps
+    every batch's padded compute about equal — short sentences get thousands per
+    batch, long ones get a handful. This keeps the GPU saturated across the whole
+    length range instead of starving on tiny short-sentence batches.
+
+    Token counts are estimated from character length (``CHARS_PER_TOKEN_EST``);
+    it is approximate, so tune ``token_budget`` by watching GPU memory.
     """
-    order = list(range(len(texts)))
+    if not token_budget or token_budget <= 0:
+        return [order[i : i + batch_size] for i in range(0, len(order), batch_size)]
+
+    char_budget = max(1, int(token_budget) * CHARS_PER_TOKEN_EST)
+    cap_len = max(1, int(max_length) * CHARS_PER_TOKEN_EST)
+    batches = []
+    i = 0
+    n = len(order)
+    while i < n:
+        head = min(len(texts[order[i]]), cap_len)  # padded width of this batch
+        head = max(head, 1)
+        k = char_budget // head
+        k = max(1, min(int(max_batch), k))
+        batches.append(order[i : i + k])
+        i += k
+    return batches
+
+
+def embed_index_range(
+    texts,
+    start,
+    end,
+    embedder,
+    *,
+    dim,
+    batch_size,
+    sort,
+    normalize,
+    tok_workers,
+    prefetch,
+    vector_dtype,
+    torch_out_dtype,
+    token_budget=0,
+    max_batch=8192,
+    max_length=2048,
+    log_prefix="",
+):
+    """Embed the contiguous original-order range [start, end) -> (end-start, dim).
+
+    Length-sorting only reorders GPU work; every vector is scattered back to
+    ``global_index - start``, so the returned buffer is in original order.
+    """
+    n = end - start
+    buf = np.empty((n, dim), dtype=vector_dtype)
+    order = list(range(start, end))
     if sort:
         order.sort(key=lambda i: len(texts[i]), reverse=True)
-    for start in range(0, len(order), batch_size):
-        yield order[start : start + batch_size]
-
-
-def embed_incloud(
-    input_h5: Path = DEFAULT_INPUT_H5,
-    output_h5: Path = DEFAULT_OUTPUT_H5,
-    local_model: str = DEFAULT_LOCAL_MODEL,
-    device: str | None = None,
-    batch_size: int = 256,
-    max_length: int = 2048,
-    attn_impl: str = "auto",
-    normalize: bool = False,
-    sort: bool = True,
-    tok_workers: int = 4,
-    prefetch: int = 8,
-    dtype: str = "float16",
-    chunk_rows: int = 2048,
-    compression: str = "none",
-    gzip_level: int = 1,
-    overwrite: bool = False,
-) -> Path:
-    import h5py
-    import torch
-
-    input_h5 = Path(input_h5)
-    output_h5 = Path(output_h5)
-    if output_h5.exists() and not overwrite:
-        print(f"embed_incloud: skip existing {output_h5}", flush=True)
-        return output_h5
-    if not input_h5.exists():
-        raise FileNotFoundError(f"Input text H5 not found: {input_h5}")
-
-    started = time.time()
-    print(f"embed_incloud: loading all texts from {input_h5} into RAM ...", flush=True)
-    texts = load_all_texts(input_h5)
-    total_sentences = len(texts)
-    if total_sentences == 0:
-        raise ValueError(f"{input_h5} has no sentence texts")
-    print(f"embed_incloud: loaded {total_sentences} sentences in {time.time() - started:.1f}s", flush=True)
-
-    embedder = FatGpuEmbedder(local_model, device=device, max_length=max_length, attn_impl=attn_impl)
-    dim = embedder.embedding_dim
-    vector_dtype = np.dtype(dtype)
-
-    est_gb = total_sentences * dim * vector_dtype.itemsize / 1e9
-    print(
-        f"embed_incloud: device={embedder.device} dim={dim} dtype={vector_dtype} "
-        f"-> RAM vectors buffer ~{est_gb:.1f}GB",
-        flush=True,
-    )
-    # Original-order buffer: batch outputs are scattered back by index, so the
-    # final write to H5 is a single sequential pass.
-    vectors_ram = np.empty((total_sentences, dim), dtype=vector_dtype)
-
-    torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
-    print(
-        f"embed_incloud: sorting {total_sentences} sentences by length "
-        f"(sort={sort}) and building batches ...",
-        flush=True,
-    )
-    sort_started = time.time()
-    batches = list(length_sorted_batches(texts, batch_size, sort=sort))
+    batches = build_batches(order, texts, batch_size, token_budget, max_batch, max_length)
     n_batches = len(batches)
     max_in_flight = max(1, prefetch)
-    print(
-        f"embed_incloud: {n_batches} batches ready in {time.time() - sort_started:.1f}s; "
-        f"starting GPU embedding (longest sentences first)",
-        flush=True,
-    )
-    embed_started = time.time()
+    started = time.time()
     done_sentences = 0
     done_batches = 0
     last_log_batches = 0
@@ -234,8 +245,7 @@ def embed_incloud(
 
     def tokenize_job(batch_indices):
         batch_texts = [texts[i] for i in batch_indices]
-        enc = embedder.tokenize(batch_texts, pin_memory=True)
-        return batch_indices, enc
+        return batch_indices, embedder.tokenize(batch_texts, pin_memory=True)
 
     with ThreadPoolExecutor(max_workers=max(1, tok_workers)) as executor:
         in_flight = {}
@@ -255,69 +265,229 @@ def embed_incloud(
                 in_flight.pop(future)
                 batch_indices, enc = future.result()
                 vectors = embedder.embed_tokens(enc, normalize=normalize, out_dtype=torch_out_dtype)
-                vectors_ram[batch_indices] = vectors
+                # Scatter by original index (offset to shard-local position).
+                buf[np.asarray(batch_indices, dtype=np.int64) - start] = vectors
                 done_sentences += len(batch_indices)
                 done_batches += 1
             fill()
-            # Log the first batch (immediate sign of life), then every log_every
-            # batches, then the final one.
             if done_batches == 1 or done_batches == n_batches or done_batches - last_log_batches >= log_every:
                 last_log_batches = done_batches
-                elapsed = time.time() - embed_started
+                elapsed = time.time() - started
                 rate = done_sentences / elapsed if elapsed > 0 else 0.0
                 print(
-                    f"[embed-incloud] batch {done_batches}/{n_batches} "
-                    f"{done_sentences}/{total_sentences} sentences "
-                    f"elapsed={elapsed:.1f}s rate={rate:.0f}/s",
+                    f"{log_prefix}batch {done_batches}/{n_batches} "
+                    f"{done_sentences}/{n} sentences elapsed={elapsed:.1f}s rate={rate:.0f}/s",
                     flush=True,
                 )
+    return buf
 
+
+def _build_config(input_h5, total_sentences, dim, vector_dtype, normalize, local_model, shard_size, chunk_rows, compression):
+    """Identity of a run; resume is only allowed when this matches the manifest."""
+    return {
+        "input_h5": str(Path(input_h5).resolve()),
+        "total_sentences": int(total_sentences),
+        "dim": int(dim),
+        "dtype": str(vector_dtype),
+        "normalize": bool(normalize),
+        "model": str(local_model),
+        "shard_size": int(shard_size),
+        "chunk_rows": int(chunk_rows),
+        "compression": str(compression),
+    }
+
+
+def _create_working_h5(
+    working, input_h5, total_sentences, dim, vector_dtype, normalize, local_model, chunk_rows, compression, gzip_level
+):
+    """Create the working H5 with all text metadata + an empty vectors dataset."""
+    import h5py
+
+    Path(working).parent.mkdir(parents=True, exist_ok=True)
+    best_effort_unlink(Path(working))
+    with h5py.File(input_h5, "r") as source, h5py.File(working, "w") as out:
+        copy_text_h5(source, out)
+        out.attrs["schema"] = EMBEDDING_H5_SCHEMA
+        out.attrs["text_h5"] = str(Path(input_h5).resolve())
+        out.attrs["embedding_backend"] = EMBEDDING_BACKEND
+        out.attrs["embedding_model"] = str(local_model)
+        out.attrs["embedding_dtype"] = str(vector_dtype)
+        out.attrs["embedding_normalize"] = bool(normalize)
+        out.attrs["embedding_created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        out.attrs["input_dim"] = dim
+        out.attrs["embedding_dim"] = dim
+        out.attrs["dtype"] = str(vector_dtype)
+        out.attrs["sentences"] = total_sentences
+        rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
+        out.create_dataset(
+            "vectors",
+            shape=(total_sentences, dim),
+            chunks=(rows_per_chunk, dim),
+            dtype=vector_dtype,
+            **compression_kwargs(compression, gzip_level),
+        )
+
+
+def _load_resumable_manifest(manifest_file, working, config, dim, vector_dtype, total_sentences):
+    """Return a usable manifest for resume, or None if a fresh start is required."""
+    import h5py
+
+    if not manifest_file.exists() or not Path(working).exists():
+        return None
+    try:
+        manifest = json.loads(Path(manifest_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if manifest.get("config") != config:
+        print("embed_incloud: manifest config differs from current run; starting fresh", flush=True)
+        return None
+    try:
+        with h5py.File(working, "r") as h5:
+            if "vectors" not in h5 or tuple(h5["vectors"].shape) != (total_sentences, dim):
+                return None
+            if str(h5["vectors"].dtype) != str(vector_dtype):
+                return None
+    except Exception as exc:
+        print(f"embed_incloud: working file unreadable ({exc}); starting fresh", flush=True)
+        return None
+    return manifest
+
+
+def embed_incloud(
+    input_h5: Path = DEFAULT_INPUT_H5,
+    output_h5: Path = DEFAULT_OUTPUT_H5,
+    local_model: str = DEFAULT_LOCAL_MODEL,
+    device: str | None = None,
+    batch_size: int = 256,
+    max_length: int = 2048,
+    attn_impl: str = "auto",
+    normalize: bool = False,
+    sort: bool = True,
+    tok_workers: int = 4,
+    prefetch: int = 8,
+    dtype: str = "float16",
+    chunk_rows: int = 2048,
+    compression: str = "none",
+    gzip_level: int = 1,
+    shard_size: int = DEFAULT_SHARD_SIZE,
+    token_budget: int = 131072,
+    max_batch: int = 8192,
+    overwrite: bool = False,
+) -> Path:
+    """Shard the corpus into contiguous ranges, embed each into the working H5,
+    and resume from a manifest if interrupted.
+
+    Each shard is a contiguous slice ``[start, end)`` of the original order and
+    is written straight to ``vectors[start:end]``, flushed, then marked done in
+    the manifest. Order is therefore identical to ``text_h5.h5`` regardless of
+    the in-shard length sort, and a killed run resumes at the last finished shard.
+    """
+    import h5py
+    import torch
+
+    input_h5 = Path(input_h5)
+    output_h5 = Path(output_h5)
+    if output_h5.exists() and not overwrite:
+        print(f"embed_incloud: skip existing {output_h5}", flush=True)
+        return output_h5
+    if not input_h5.exists():
+        raise FileNotFoundError(f"Input text H5 not found: {input_h5}")
+
+    manifest_file = manifest_path_for(output_h5)
+    working = working_path_for(output_h5)
+    if overwrite:
+        best_effort_unlink(working)
+        best_effort_unlink(manifest_file)
+
+    started = time.time()
+    print(f"embed_incloud: loading all texts from {input_h5} into RAM ...", flush=True)
+    texts = load_all_texts(input_h5)
+    total_sentences = len(texts)
+    if total_sentences == 0:
+        raise ValueError(f"{input_h5} has no sentence texts")
+    print(f"embed_incloud: loaded {total_sentences} sentences in {time.time() - started:.1f}s", flush=True)
+
+    embedder = FatGpuEmbedder(local_model, device=device, max_length=max_length, attn_impl=attn_impl)
+    dim = embedder.embedding_dim
+    vector_dtype = np.dtype(dtype)
+    torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
+
+    # Align shard size to a whole number of chunks so a chunk never straddles two
+    # shards (keeps each shard's write self-contained).
+    rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
+    shard_size = max(rows_per_chunk, (max(1, int(shard_size)) // rows_per_chunk) * rows_per_chunk)
+
+    config = _build_config(
+        input_h5, total_sentences, dim, vector_dtype, normalize, local_model, shard_size, chunk_rows, compression
+    )
+    manifest = _load_resumable_manifest(manifest_file, working, config, dim, vector_dtype, total_sentences)
+    if manifest is None:
+        print(
+            f"embed_incloud: fresh start; device={embedder.device} dim={dim} dtype={vector_dtype} "
+            f"shard_size={shard_size} -> final ~{total_sentences * dim * vector_dtype.itemsize / 1e9:.1f}GB on disk",
+            flush=True,
+        )
+        _create_working_h5(
+            working, input_h5, total_sentences, dim, vector_dtype, normalize, local_model,
+            chunk_rows, compression, gzip_level,
+        )
+        manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "output_h5": str(output_h5.resolve()),
+            "working_h5": str(Path(working).resolve()),
+            "config": config,
+            "shards": plan_shards(total_sentences, shard_size),
+        }
+        atomic_json_write(manifest, manifest_file)
+    else:
+        done = sum(1 for s in manifest["shards"] if s["status"] == "done")
+        print(
+            f"embed_incloud: resuming {working}; {done}/{len(manifest['shards'])} shards already done",
+            flush=True,
+        )
+
+    shards = manifest["shards"]
+    pending = [s for s in shards if s["status"] != "done"]
+    batching = (
+        f"token_budget≈{token_budget} max_batch={max_batch}" if token_budget and token_budget > 0
+        else f"fixed batch_size={batch_size}"
+    )
     print(
-        f"embed_incloud: embedding done in {time.time() - embed_started:.1f}s; writing {output_h5}",
+        f"embed_incloud: {len(shards)} shards total, {len(pending)} to embed "
+        f"(shard_size={shard_size}, batching: {batching})",
         flush=True,
     )
 
-    output_h5.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = atomic_h5_path(output_h5)
-    unlink_with_retry(tmp_path)
-    write_started = time.time()
-    try:
-        with h5py.File(input_h5, "r") as source, h5py.File(tmp_path, "w") as out:
-            copy_text_h5(source, out)
-            out.attrs["schema"] = EMBEDDING_H5_SCHEMA
-            out.attrs["text_h5"] = str(input_h5.resolve())
-            out.attrs["embedding_backend"] = EMBEDDING_BACKEND
-            out.attrs["embedding_model"] = str(local_model)
-            out.attrs["embedding_dtype"] = str(vector_dtype)
-            out.attrs["embedding_normalize"] = bool(normalize)
-            out.attrs["embedding_created_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            out.attrs["input_dim"] = dim
-            out.attrs["embedding_dim"] = dim
-            out.attrs["dtype"] = str(vector_dtype)
-            out.attrs["sentences"] = total_sentences
+    run_started = time.time()
+    for shard in shards:
+        if shard["status"] == "done":
+            continue
+        start, end = int(shard["start"]), int(shard["end"])
+        prefix = f"[shard {shard['id']}/{len(shards) - 1} {start}:{end}] "
+        print(f"embed_incloud: embedding {prefix.strip()}", flush=True)
+        buf = embed_index_range(
+            texts, start, end, embedder,
+            dim=dim, batch_size=batch_size, sort=sort, normalize=normalize,
+            tok_workers=tok_workers, prefetch=prefetch,
+            vector_dtype=vector_dtype, torch_out_dtype=torch_out_dtype,
+            token_budget=token_budget, max_batch=max_batch, max_length=max_length,
+            log_prefix=prefix,
+        )
+        with h5py.File(working, "a") as out:
+            out["vectors"][start:end] = buf
+            out.flush()
+        del buf
+        shard["status"] = "done"
+        atomic_json_write(manifest, manifest_file)
+        elapsed = time.time() - run_started
+        print(f"embed_incloud: shard {shard['id']} written + checkpointed (run elapsed={elapsed:.1f}s)", flush=True)
 
-            rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
-            vectors_ds = out.create_dataset(
-                "vectors",
-                shape=(total_sentences, dim),
-                chunks=(rows_per_chunk, dim),
-                dtype=vector_dtype,
-                **compression_kwargs(compression, gzip_level),
-            )
-            # Sequential, chunk-aligned write of the original-order buffer.
-            write_block = max(rows_per_chunk, 1) * 64
-            for start in range(0, total_sentences, write_block):
-                end = min(start + write_block, total_sentences)
-                vectors_ds[start:end] = vectors_ram[start:end]
-
-        replace_with_retry(tmp_path, output_h5)
-    except BaseException:
-        best_effort_unlink(tmp_path)
-        raise
-
+    # All shards present in the working file: promote it to the final output.
+    replace_with_retry(Path(working), output_h5)
+    best_effort_unlink(manifest_file)
     print(
         f"embed_incloud: wrote {output_h5} sentences={total_sentences} dim={dim} "
-        f"write={time.time() - write_started:.1f}s total={time.time() - started:.1f}s",
+        f"total={time.time() - started:.1f}s",
         flush=True,
     )
     return output_h5
@@ -329,7 +499,25 @@ def parse_args():
     parser.add_argument("--output-h5", type=Path, default=DEFAULT_OUTPUT_H5)
     parser.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--batch-size", default=256, type=int, help="GPU forward batch size")
+    parser.add_argument(
+        "--batch-size",
+        default=256,
+        type=int,
+        help="fixed sentences/batch; only used when --token-budget 0",
+    )
+    parser.add_argument(
+        "--token-budget",
+        default=131072,
+        type=int,
+        help="approx tokens/batch for dynamic batching (0 disables -> fixed --batch-size); "
+        "raise it until GPU memory is ~70%% full",
+    )
+    parser.add_argument(
+        "--max-batch",
+        default=8192,
+        type=int,
+        help="cap on sentences/batch under --token-budget (guards short-sentence batches)",
+    )
     parser.add_argument("--max-length", default=2048, type=int)
     parser.add_argument(
         "--attn-impl",
@@ -345,7 +533,13 @@ def parse_args():
     parser.add_argument("--chunk-rows", default=2048, type=int)
     parser.add_argument("--compression", choices=["none", "gzip", "lzf"], default="none")
     parser.add_argument("--gzip-level", default=1, type=int)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--shard-size",
+        default=DEFAULT_SHARD_SIZE,
+        type=int,
+        help="sentences per shard/checkpoint (aligned down to a multiple of --chunk-rows)",
+    )
+    parser.add_argument("--overwrite", action="store_true", help="discard any resume state and recompute")
     return parser.parse_args()
 
 
@@ -367,6 +561,9 @@ def main():
         chunk_rows=args.chunk_rows,
         compression=args.compression,
         gzip_level=args.gzip_level,
+        shard_size=args.shard_size,
+        token_budget=args.token_budget,
+        max_batch=args.max_batch,
         overwrite=args.overwrite,
     )
 
