@@ -177,7 +177,7 @@ def parallel_download(url: str, out_file: Path, workers: int = 8) -> None:
 
     try:
         with ThreadPoolExecutor(max_workers=len(bounds)) as pool:
-            list(pool.map(fetch, bounds))
+            list(pool.map(fetch, range(len(bounds))))
     finally:
         # Persist whatever progress we have so an interruption can resume.
         save_progress()
