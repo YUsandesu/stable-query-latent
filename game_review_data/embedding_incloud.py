@@ -1,6 +1,16 @@
-"""In-RAM, single-A100 embedding of the unified text H5 into an embedding H5.
+"""In-RAM embedding of the unified text H5 into an embedding H5.
 
-Strategy (tuned for one big GPU + lots of host RAM, e.g. 80GB A100 / 200GB RAM):
+Two modes are supported:
+
+    1. one-file output: current monolith behavior for a big local GPU box.
+    2. cloud stream output: shard locally, upload shards to Drive, resume from
+       a Drive-backed manifest, and let a later server reassemble the final H5.
+
+The original single-file path is still the default. Pass ``--cloud-stream-dir``
+to switch to the Drive-backed stream workflow.
+
+Strategy for the one-file path (tuned for one big GPU + lots of host RAM, e.g.
+80GB A100 / 200GB RAM):
 
     1. Load *all* sentence texts from ``text_h5.h5`` into host RAM at once.
     2. Sort sentence indices by length (descending) so each batch packs
@@ -26,6 +36,7 @@ import argparse
 import json
 import sys
 import time
+import shutil
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -69,6 +80,17 @@ DEFAULT_LOCAL_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_BACKEND = "local_incloud"
 DEFAULT_SHARD_SIZE = 2_000_000
 MANIFEST_SCHEMA = "embedding_incloud.manifest.v1"
+STREAM_MANIFEST_SCHEMA = "embedding_stream.manifest.v1"
+STREAM_STATUS_IN_PROGRESS = "in_progress"
+STREAM_STATUS_COMPLETE = "complete"
+STREAM_EMBED_PENDING = "pending"
+STREAM_EMBED_DONE = "done"
+STREAM_UPLOAD_WAIT = "wait"
+STREAM_UPLOAD_UPLOADING = "uploading"
+STREAM_UPLOAD_FAILED = "failed"
+STREAM_UPLOAD_DONE = "done"
+STREAM_SOURCE_MONOLITH = "monolith"
+STREAM_SOURCE_STREAM = "stream"
 
 
 class FatGpuEmbedder:
@@ -189,10 +211,11 @@ def manifest_path_for(output_h5: Path) -> Path:
     return output_h5.with_name(output_h5.name + ".incloud_manifest.json")
 
 
-def working_path_for(output_h5: Path) -> Path:
+def working_path_for(output_h5: Path, output_dir: Path | None = None) -> Path:
     """Stable (non-PID) working-file name so it survives restarts for resume."""
     output_h5 = Path(output_h5)
-    return output_h5.with_name(output_h5.name + ".incloud.partial.h5")
+    base_dir = Path(output_dir) if output_dir is not None else output_h5.parent
+    return base_dir / (output_h5.name + ".incloud.partial.h5")
 
 
 def plan_shards(total: int, shard_size: int) -> list[dict]:
@@ -206,6 +229,292 @@ def plan_shards(total: int, shard_size: int) -> list[dict]:
         start = end
         shard_id += 1
     return shards
+
+
+def stream_manifest_path(cloud_stream_dir: Path) -> Path:
+    return Path(cloud_stream_dir) / "stream_manifest.json"
+
+
+def stream_manifest_bak_path(cloud_stream_dir: Path) -> Path:
+    return Path(cloud_stream_dir) / "stream_manifest.json.bak"
+
+
+def stream_remote_text_h5_path(cloud_stream_dir: Path) -> Path:
+    return Path(cloud_stream_dir) / "text_h5.h5"
+
+
+def stream_remote_shard_path(cloud_stream_dir: Path, shard_id: int) -> Path:
+    return Path(cloud_stream_dir) / f"shard_{int(shard_id):05d}.h5"
+
+
+def stream_config(
+    input_h5: Path,
+    total_sentences: int,
+    dim: int,
+    vector_dtype,
+    normalize: bool,
+    local_model: str,
+    shard_size: int,
+) -> dict:
+    return {
+        "text_h5": str(Path(input_h5).resolve()),
+        "total_sentences": int(total_sentences),
+        "dim": int(dim),
+        "dtype": str(np.dtype(vector_dtype)),
+        "normalize": bool(normalize),
+        "model": str(local_model),
+        "shard_size": int(shard_size),
+    }
+
+
+def config_matches(expected: dict, recorded: dict | None) -> bool:
+    if not isinstance(recorded, dict):
+        return False
+    alias_map = {"text_h5": "input_h5", "input_h5": "text_h5"}
+    for key, value in expected.items():
+        candidate = recorded.get(key)
+        if candidate is None and key in alias_map:
+            candidate = recorded.get(alias_map[key])
+        if candidate != value:
+            return False
+    return True
+
+
+def load_json_with_backup(path: Path, backup_path: Path | None = None) -> dict | None:
+    path = Path(path)
+    candidates = [path]
+    if backup_path is not None:
+        candidates.append(Path(backup_path))
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def write_json_via_move(payload: dict, path: Path, *, stage_dir: Path, backup_path: Path | None = None) -> None:
+    path = Path(path)
+    stage_dir = Path(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = stage_dir / (path.name + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if backup_path is not None and path.exists():
+            shutil.copy2(path, backup_path)
+        if path.exists():
+            path.unlink()
+        shutil.move(str(tmp_path), str(path))
+    except BaseException:
+        best_effort_unlink(tmp_path)
+        raise
+
+
+def ensure_local_copy(source: Path, target: Path) -> Path:
+    source = Path(source)
+    target = Path(target)
+    if target.exists():
+        return target
+    if not source.exists():
+        raise FileNotFoundError(f"Missing source file: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return target
+
+
+def ensure_text_h5_pair(local_path: Path, remote_path: Path) -> Path:
+    local_path = Path(local_path)
+    remote_path = Path(remote_path)
+    local_exists = local_path.exists()
+    remote_exists = remote_path.exists()
+    if local_exists and not remote_exists:
+        remote_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_path, remote_path)
+    elif remote_exists:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(remote_path, local_path)
+    else:
+        raise FileNotFoundError(f"Neither local nor remote text H5 exists: {local_path} / {remote_path}")
+    return local_path if local_path.exists() else remote_path
+
+
+def move_overwrite(source: Path, target: Path) -> Path:
+    source = Path(source)
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    shutil.move(str(source), str(target))
+    return target
+
+
+def load_text_range(input_h5: Path, start: int, end: int) -> list[str]:
+    import h5py
+
+    with h5py.File(input_h5, "r") as h5:
+        if "texts" not in h5:
+            raise ValueError(f"{input_h5} has no 'texts' dataset")
+        raw = h5["texts"][int(start) : int(end)]
+    return [decode_text(value) for value in raw]
+
+
+def load_vectors_only_shard(
+    path: Path,
+    rows: int,
+    dim: int,
+    vector_dtype,
+    *,
+    start: int | None = None,
+    end: int | None = None,
+) -> np.ndarray:
+    """Read a shard or monolith slice into a vectors-only ndarray."""
+    import h5py
+
+    path = Path(path)
+    with h5py.File(path, "r") as h5:
+        if "vectors" not in h5:
+            raise ValueError(f"{path} has no 'vectors' dataset")
+        ds = h5["vectors"]
+        if start is None and end is None:
+            raw = ds[:]
+        else:
+            raw = ds[int(start) : int(end)]
+        vectors = np.asarray(raw, dtype=np.dtype(vector_dtype))
+    if vectors.ndim != 2 or int(vectors.shape[0]) != int(rows) or int(vectors.shape[1]) != int(dim):
+        raise ValueError(f"{path}: vectors shape {vectors.shape} does not match rows={rows}, dim={dim}")
+    return vectors
+
+
+def shard_file_payload(
+    vectors: np.ndarray,
+    shard: dict,
+    *,
+    dim: int,
+    vector_dtype,
+    normalize: bool,
+    source_text_h5: Path,
+    local_model: str,
+    compression: str,
+    gzip_level: int,
+    rows_per_chunk: int,
+):
+    import h5py
+
+    vectors = np.asarray(vectors, dtype=np.dtype(vector_dtype))
+    if vectors.ndim != 2:
+        raise ValueError(f"Shard vectors must be 2D, got {vectors.shape}")
+    rows, actual_dim = map(int, vectors.shape)
+    if rows != int(shard["rows"]) or actual_dim != int(dim):
+        raise ValueError(
+            f"Shard payload shape {vectors.shape} does not match rows={shard['rows']} dim={dim}"
+        )
+    tmp = h5py.File  # keep local import usage obvious to linters
+    del tmp
+    return {
+        "vectors": vectors,
+        "attrs": {
+            "global_start": int(shard["start"]),
+            "global_end": int(shard["end"]),
+            "shard_id": int(shard["id"]),
+            "dim": int(dim),
+            "dtype": str(np.dtype(vector_dtype)),
+            "normalize": bool(normalize),
+            "source_text_h5": str(Path(source_text_h5).resolve()),
+            "embedding_backend": EMBEDDING_BACKEND,
+            "embedding_model": str(local_model),
+            "compression": str(compression),
+            "gzip_level": int(gzip_level),
+            "rows_per_chunk": int(rows_per_chunk),
+        },
+    }
+
+
+def write_vectors_shard(
+    shard_path: Path,
+    vectors: np.ndarray,
+    shard: dict,
+    *,
+    dim: int,
+    vector_dtype,
+    normalize: bool,
+    source_text_h5: Path,
+    local_model: str,
+    compression: str,
+    gzip_level: int,
+    stage_dir: Path,
+    rows_per_chunk: int,
+) -> Path:
+    import h5py
+
+    shard_path = Path(shard_path)
+    stage_dir = Path(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    shard_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = stage_dir / (shard_path.name + ".tmp")
+    payload = shard_file_payload(
+        vectors,
+        shard,
+        dim=dim,
+        vector_dtype=vector_dtype,
+        normalize=normalize,
+        source_text_h5=source_text_h5,
+        local_model=local_model,
+        compression=compression,
+        gzip_level=gzip_level,
+        rows_per_chunk=rows_per_chunk,
+    )
+    try:
+        with h5py.File(tmp_path, "w") as h5:
+            h5.create_dataset(
+                "vectors",
+                data=payload["vectors"],
+                dtype=np.dtype(vector_dtype),
+                chunks=(max(1, min(int(rows_per_chunk), int(vectors.shape[0]))), int(dim)),
+                **compression_kwargs(compression, gzip_level),
+            )
+            for key, value in payload["attrs"].items():
+                h5.attrs[key] = value
+        move_overwrite(tmp_path, shard_path)
+    except BaseException:
+        best_effort_unlink(tmp_path)
+        raise
+    return shard_path
+
+
+def validate_shard_file(path: Path, shard: dict, dim: int, vector_dtype) -> tuple[bool, str, dict]:
+    import h5py
+
+    path = Path(path)
+    if not path.exists():
+        return False, "missing file", {}
+    try:
+        with h5py.File(path, "r") as h5:
+            if "vectors" not in h5:
+                return False, "missing vectors dataset", {}
+            vectors = h5["vectors"]
+            rows, actual_dim = map(int, vectors.shape)
+            actual_dtype = str(vectors.dtype)
+            verify = {"rows": rows, "dim": actual_dim, "dtype": actual_dtype}
+            if rows != int(shard["rows"]):
+                return False, f"rows mismatch: actual={rows} expected={int(shard['rows'])}", verify
+            if actual_dim != int(dim):
+                return False, f"dim mismatch: actual={actual_dim} expected={int(dim)}", verify
+            if actual_dtype != str(np.dtype(vector_dtype)):
+                return False, f"dtype mismatch: actual={actual_dtype} expected={str(np.dtype(vector_dtype))}", verify
+            if int(h5.attrs.get("global_start", -1)) != int(shard["start"]):
+                return False, "global_start attr mismatch", verify
+            if int(h5.attrs.get("global_end", -1)) != int(shard["end"]):
+                return False, "global_end attr mismatch", verify
+            if int(h5.attrs.get("shard_id", -1)) != int(shard["id"]):
+                return False, "shard_id attr mismatch", verify
+            return True, "ok", verify
+    except Exception as exc:
+        return False, f"cannot read H5: {exc}", {}
 
 
 def build_batches(order, lengths, batch_size, token_budget, max_batch):
@@ -404,7 +713,7 @@ def _load_resumable_manifest(manifest_file, working, config, dim, vector_dtype, 
     return manifest
 
 
-def embed_incloud(
+def one_file_output(
     input_h5: Path = DEFAULT_INPUT_H5,
     output_h5: Path = DEFAULT_OUTPUT_H5,
     local_model: str = DEFAULT_LOCAL_MODEL,
@@ -425,14 +734,7 @@ def embed_incloud(
     max_batch: int = 8192,
     overwrite: bool = False,
 ) -> Path:
-    """Shard the corpus into contiguous ranges, embed each into the working H5,
-    and resume from a manifest if interrupted.
-
-    Each shard is a contiguous slice ``[start, end)`` of the original order and
-    is written straight to ``vectors[start:end]``, flushed, then marked done in
-    the manifest. Order is therefore identical to ``text_h5.h5`` regardless of
-    the in-shard length sort, and a killed run resumes at the last finished shard.
-    """
+    """Old monolith behavior: embed everything in RAM, then write one H5."""
     import gc
 
     import h5py
@@ -465,8 +767,6 @@ def embed_incloud(
     vector_dtype = np.dtype(dtype)
     torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
 
-    # Align shard size to a whole number of chunks so a chunk never straddles two
-    # shards (keeps each shard's write self-contained).
     rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
     shard_size = max(rows_per_chunk, (max(1, int(shard_size)) // rows_per_chunk) * rows_per_chunk)
 
@@ -481,8 +781,16 @@ def embed_incloud(
             flush=True,
         )
         _create_working_h5(
-            working, input_h5, total_sentences, dim, vector_dtype, normalize, local_model,
-            chunk_rows, compression, gzip_level,
+            working,
+            input_h5,
+            total_sentences,
+            dim,
+            vector_dtype,
+            normalize,
+            local_model,
+            chunk_rows,
+            compression,
+            gzip_level,
         )
         manifest = {
             "schema": MANIFEST_SCHEMA,
@@ -519,20 +827,27 @@ def embed_incloud(
         prefix = f"[shard {shard['id']}/{len(shards) - 1} {start}:{end}] "
         print(f"embed_incloud: embedding {prefix.strip()}", flush=True)
         buf = embed_index_range(
-            texts, start, end, embedder,
-            dim=dim, batch_size=batch_size, sort=sort, normalize=normalize,
-            tok_workers=tok_workers, prefetch=prefetch,
-            vector_dtype=vector_dtype, torch_out_dtype=torch_out_dtype,
-            token_budget=token_budget, max_batch=max_batch, max_length=max_length,
+            texts,
+            start,
+            end,
+            embedder,
+            dim=dim,
+            batch_size=batch_size,
+            sort=sort,
+            normalize=normalize,
+            tok_workers=tok_workers,
+            prefetch=prefetch,
+            vector_dtype=vector_dtype,
+            torch_out_dtype=torch_out_dtype,
+            token_budget=token_budget,
+            max_batch=max_batch,
+            max_length=max_length,
             log_prefix=prefix,
         )
         with h5py.File(working, "a") as out:
             out["vectors"][start:end] = buf
             out.flush()
         del buf
-        # Release this shard's cached GPU blocks back to the allocator so batch-shape
-        # variation across shards can't fragment into an eventual OOM. The model stays
-        # resident; only the freed activation cache is returned.
         if str(embedder.device).startswith("cuda"):
             gc.collect()
             torch.cuda.empty_cache()
@@ -541,7 +856,6 @@ def embed_incloud(
         elapsed = time.time() - run_started
         print(f"embed_incloud: shard {shard['id']} written + checkpointed (run elapsed={elapsed:.1f}s)", flush=True)
 
-    # All shards present in the working file: promote it to the final output.
     replace_with_retry(Path(working), output_h5)
     best_effort_unlink(manifest_file)
     print(
@@ -552,10 +866,480 @@ def embed_incloud(
     return output_h5
 
 
+def stream_manifest_initial_state(
+    *,
+    input_h5: Path,
+    output_h5: Path,
+    cloud_stream_dir: Path,
+    working_dir: Path,
+    total_sentences: int,
+    dim: int,
+    vector_dtype,
+    normalize: bool,
+    local_model: str,
+    shard_size: int,
+    use_existing_monolith: bool,
+) -> dict:
+    stream_manifest_file = stream_manifest_path(cloud_stream_dir)
+    stream_manifest_backup = stream_manifest_bak_path(cloud_stream_dir)
+    legacy_manifest_file = manifest_path_for(output_h5)
+    expected_config = stream_config(input_h5, total_sentences, dim, vector_dtype, normalize, local_model, shard_size)
+    manifest = load_json_with_backup(stream_manifest_file, stream_manifest_backup)
+    if manifest is not None and (
+        manifest.get("schema") != STREAM_MANIFEST_SCHEMA or not config_matches(expected_config, manifest.get("config"))
+    ):
+        print("embed_incloud: stream config differs from existing manifest; starting fresh", flush=True)
+        manifest = None
+
+    if manifest is None:
+        legacy_manifest = load_json_with_backup(legacy_manifest_file)
+        if legacy_manifest is not None and config_matches(expected_config, legacy_manifest.get("config")):
+            shards = []
+            for shard in legacy_manifest.get("shards", []):
+                if not isinstance(shard, dict):
+                    continue
+                shard_id = int(shard.get("id", len(shards)))
+                start = int(shard.get("start", 0))
+                end = int(shard.get("end", start))
+                rows = int(shard.get("rows", max(0, end - start)))
+                legacy_status = str(shard.get("status", "pending"))
+                source = STREAM_SOURCE_MONOLITH if legacy_status == "done" else STREAM_SOURCE_STREAM
+                embed_status = STREAM_EMBED_DONE if legacy_status == "done" else STREAM_EMBED_PENDING
+                shards.append(
+                    {
+                        "id": shard_id,
+                        "start": start,
+                        "end": end,
+                        "rows": rows,
+                        "embed_status": embed_status,
+                        "upload_status": STREAM_UPLOAD_WAIT,
+                        "source": source,
+                        "remote_path": str(stream_remote_shard_path(cloud_stream_dir, shard_id)),
+                        "bytes": 0,
+                        "verify": {},
+                    }
+                )
+            manifest = {
+                "schema": STREAM_MANIFEST_SCHEMA,
+                "config": expected_config,
+                "cloud_stream_dir": str(Path(cloud_stream_dir).resolve()),
+                "created_at": legacy_manifest.get("created_at", time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "status": STREAM_STATUS_IN_PROGRESS,
+                "shards": shards,
+            }
+        else:
+            manifest = {
+                "schema": STREAM_MANIFEST_SCHEMA,
+                "config": expected_config,
+                "cloud_stream_dir": str(Path(cloud_stream_dir).resolve()),
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "status": STREAM_STATUS_IN_PROGRESS,
+                "shards": [],
+            }
+    if not manifest.get("shards"):
+        shards = plan_shards(total_sentences, shard_size)
+        for shard in shards:
+            shard["embed_status"] = STREAM_EMBED_PENDING
+            shard["upload_status"] = STREAM_UPLOAD_WAIT
+            shard["source"] = STREAM_SOURCE_STREAM
+            shard["remote_path"] = str(stream_remote_shard_path(cloud_stream_dir, shard["id"]))
+            shard["bytes"] = 0
+            shard["verify"] = {}
+        manifest["shards"] = shards
+    else:
+        manifest["shards"] = list(manifest["shards"])
+
+    monolith_path = working_path_for(output_h5, output_dir=working_dir)
+    if use_existing_monolith and monolith_path.exists():
+        for shard in manifest["shards"]:
+            if shard.get("source") == STREAM_SOURCE_MONOLITH and shard.get("upload_status") != STREAM_UPLOAD_DONE:
+                shard["upload_status"] = STREAM_UPLOAD_WAIT
+                shard["embed_status"] = STREAM_EMBED_DONE
+                shard["remote_path"] = str(stream_remote_shard_path(cloud_stream_dir, shard["id"]))
+    elif not monolith_path.exists():
+        for shard in manifest["shards"]:
+            if shard.get("source") == STREAM_SOURCE_MONOLITH and shard.get("upload_status") != STREAM_UPLOAD_DONE:
+                shard["embed_status"] = STREAM_EMBED_PENDING
+                shard["source"] = STREAM_SOURCE_STREAM
+    elif not use_existing_monolith:
+        for shard in manifest["shards"]:
+            if shard.get("source") == STREAM_SOURCE_MONOLITH and shard.get("upload_status") != STREAM_UPLOAD_DONE:
+                shard["embed_status"] = STREAM_EMBED_PENDING
+                shard["source"] = STREAM_SOURCE_STREAM
+    manifest["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    return manifest
+
+
+def copy_monolith_shard_to_drive(
+    *,
+    monolith_path: Path,
+    shard: dict,
+    cloud_stream_dir: Path,
+    output_dir: Path,
+    vector_dtype,
+    dim: int,
+    normalize: bool,
+    local_model: str,
+    free_floor_bytes: int,
+    compression: str,
+    gzip_level: int,
+    stage_dir: Path,
+) -> tuple[bool, str]:
+    free_bytes = shutil.disk_usage("/content").free if Path("/content").exists() else shutil.disk_usage(output_dir).free
+    if int(free_bytes) <= int(free_floor_bytes):
+        return False, f"free space below floor: {free_bytes} <= {free_floor_bytes}"
+    if not Path(monolith_path).exists():
+        return False, f"missing monolith {monolith_path}"
+
+    rows = int(shard["rows"])
+    start = int(shard["start"])
+    end = int(shard["end"])
+    vectors = load_vectors_only_shard(
+        Path(monolith_path),
+        rows=rows,
+        dim=dim,
+        vector_dtype=vector_dtype,
+        start=start,
+        end=end,
+    )
+    shard_path = Path(output_dir) / f"shard_{int(shard['id']):05d}.h5"
+    write_vectors_shard(
+        shard_path,
+        vectors,
+        shard,
+        dim=dim,
+        vector_dtype=vector_dtype,
+        normalize=normalize,
+        source_text_h5=Path(monolith_path),
+        local_model=local_model,
+        compression=compression,
+        gzip_level=gzip_level,
+        stage_dir=stage_dir,
+        rows_per_chunk=max(1, min(rows, rows)),
+    )
+    remote_path = stream_remote_shard_path(cloud_stream_dir, shard["id"])
+    remote_path.parent.mkdir(parents=True, exist_ok=True)
+    move_overwrite(shard_path, remote_path)
+    ok, reason, verify = validate_shard_file(remote_path, shard, dim, vector_dtype)
+    if not ok:
+        return False, f"verify failed: {reason}"
+    shard["upload_status"] = STREAM_UPLOAD_DONE
+    shard["bytes"] = int(remote_path.stat().st_size)
+    shard["verify"] = verify
+    return True, str(remote_path)
+
+
+def stream_cloud_output(
+    input_h5: Path = DEFAULT_INPUT_H5,
+    output_h5: Path = DEFAULT_OUTPUT_H5,
+    local_model: str = DEFAULT_LOCAL_MODEL,
+    device: str | None = None,
+    batch_size: int = 256,
+    max_length: int = 2048,
+    attn_impl: str = "auto",
+    normalize: bool = False,
+    sort: bool = True,
+    tok_workers: int = 4,
+    prefetch: int = 8,
+    dtype: str = "float16",
+    chunk_rows: int = 2048,
+    compression: str = "none",
+    gzip_level: int = 1,
+    shard_size: int = DEFAULT_SHARD_SIZE,
+    token_budget: int = 131072,
+    max_batch: int = 8192,
+    overwrite: bool = False,
+    output_dir: Path | None = None,
+    cloud_stream_dir: Path | None = None,
+    free_floor_bytes: int = 8 * 1024**3,
+) -> Path:
+    """Drive-backed streaming workflow for Colab-style limited local storage."""
+    import gc
+    import h5py
+    import torch
+
+    input_h5 = Path(input_h5)
+    output_h5 = Path(output_h5)
+    output_dir = Path(output_dir) if output_dir is not None else output_h5.parent
+    cloud_stream_dir = Path(cloud_stream_dir) if cloud_stream_dir is not None else None
+    if cloud_stream_dir is None:
+        raise ValueError("cloud_stream_dir is required for stream output")
+
+    cloud_stream_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    working = working_path_for(output_h5, output_dir=output_dir)
+    if overwrite:
+        best_effort_unlink(working)
+        best_effort_unlink(output_h5)
+        best_effort_unlink(stream_manifest_path(cloud_stream_dir))
+        best_effort_unlink(stream_manifest_bak_path(cloud_stream_dir))
+        best_effort_unlink(manifest_path_for(output_h5))
+
+    remote_text_h5 = stream_remote_text_h5_path(cloud_stream_dir)
+    input_h5 = ensure_text_h5_pair(input_h5, remote_text_h5)
+
+    started = time.time()
+    print(f"embed_incloud: loading all texts from {input_h5} into RAM ...", flush=True)
+    texts = load_all_texts(input_h5)
+    total_sentences = len(texts)
+    if total_sentences == 0:
+        raise ValueError(f"{input_h5} has no sentence texts")
+    print(f"embed_incloud: loaded {total_sentences} sentences in {time.time() - started:.1f}s", flush=True)
+
+    embedder = FatGpuEmbedder(local_model, device=device, max_length=max_length, attn_impl=attn_impl)
+    dim = embedder.embedding_dim
+    vector_dtype = np.dtype(dtype)
+    torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
+    rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
+    shard_size = max(rows_per_chunk, (max(1, int(shard_size)) // rows_per_chunk) * rows_per_chunk)
+    manifest = stream_manifest_initial_state(
+        input_h5=input_h5,
+        output_h5=output_h5,
+        cloud_stream_dir=cloud_stream_dir,
+        working_dir=output_dir,
+        total_sentences=total_sentences,
+        dim=dim,
+        vector_dtype=vector_dtype,
+        normalize=normalize,
+        local_model=local_model,
+        shard_size=shard_size,
+        use_existing_monolith=Path(working).exists(),
+    )
+
+    stream_manifest_file = stream_manifest_path(cloud_stream_dir)
+    stream_manifest_backup = stream_manifest_bak_path(cloud_stream_dir)
+    if not stream_manifest_file.exists():
+        write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+
+    if not Path(working).exists() and manifest and any(
+        shard.get("source") == STREAM_SOURCE_MONOLITH and shard.get("upload_status") != STREAM_UPLOAD_DONE
+        for shard in manifest.get("shards", [])
+    ):
+        print("embed_incloud: monolith missing; pending monolith shards will be re-embedded from text_h5", flush=True)
+
+    shards = manifest["shards"]
+    print(
+        f"embed_incloud: stream mode -> {len(shards)} shards total "
+        f"(shard_size={shard_size}, free_floor={free_floor_bytes})",
+        flush=True,
+    )
+
+    # Phase 1: if monolith exists, copy shards out first.
+    monolith_path = Path(working)
+    if monolith_path.exists():
+        print(f"embed_incloud: phase 1 copy from monolith {monolith_path}", flush=True)
+        for shard in shards:
+            if shard.get("upload_status") == STREAM_UPLOAD_DONE:
+                continue
+            if shard.get("source") != STREAM_SOURCE_MONOLITH:
+                continue
+            while shutil.disk_usage(output_dir).free <= int(free_floor_bytes):
+                time.sleep(2.0)
+            shard["upload_status"] = STREAM_UPLOAD_UPLOADING
+            shard["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+            start = int(shard["start"])
+            end = int(shard["end"])
+            buf = load_vectors_only_shard(
+                monolith_path,
+                rows=int(shard["rows"]),
+                dim=dim,
+                vector_dtype=vector_dtype,
+                start=start,
+                end=end,
+            )
+            shard["source"] = STREAM_SOURCE_MONOLITH
+            shard_path = write_vectors_shard(
+                output_dir / f"shard_{int(shard['id']):05d}.h5",
+                buf,
+                shard,
+                dim=dim,
+                vector_dtype=vector_dtype,
+                normalize=normalize,
+                source_text_h5=input_h5,
+                local_model=local_model,
+                compression=compression,
+                gzip_level=gzip_level,
+                stage_dir=output_dir,
+                rows_per_chunk=rows_per_chunk,
+            )
+            remote_path = stream_remote_shard_path(cloud_stream_dir, shard["id"])
+            move_overwrite(shard_path, remote_path)
+            ok, reason, verify = validate_shard_file(remote_path, shard, dim, vector_dtype)
+            if not ok:
+                shard["upload_status"] = STREAM_UPLOAD_FAILED
+                shard["verify"] = {"error": reason}
+                write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+                print(f"embed_incloud: shard {shard['id']} verify failed: {reason}", flush=True)
+                continue
+            shard["upload_status"] = STREAM_UPLOAD_DONE
+            shard["bytes"] = int(remote_path.stat().st_size)
+            shard["verify"] = verify
+            shard["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+            print(f"embed_incloud: shard {shard['id']} uploaded from monolith", flush=True)
+        if all(shard.get("upload_status") == STREAM_UPLOAD_DONE for shard in shards if shard.get("source") == STREAM_SOURCE_MONOLITH):
+            best_effort_unlink(monolith_path)
+            print(f"embed_incloud: removed monolith {monolith_path}", flush=True)
+
+    # Phase 2: embed any remaining pending shards.
+    for shard in shards:
+        if shard.get("upload_status") == STREAM_UPLOAD_DONE:
+            continue
+        while shutil.disk_usage(output_dir).free <= int(free_floor_bytes):
+            time.sleep(2.0)
+        start = int(shard["start"])
+        end = int(shard["end"])
+        shard["embed_status"] = STREAM_EMBED_PENDING
+        shard["upload_status"] = STREAM_UPLOAD_UPLOADING
+        shard["source"] = STREAM_SOURCE_STREAM
+        shard["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+        print(f"embed_incloud: embedding shard {shard['id']} [{start}:{end}]", flush=True)
+        buf = embed_index_range(
+            texts,
+            start,
+            end,
+            embedder,
+            dim=dim,
+            batch_size=batch_size,
+            sort=sort,
+            normalize=normalize,
+            tok_workers=tok_workers,
+            prefetch=prefetch,
+            vector_dtype=vector_dtype,
+            torch_out_dtype=torch_out_dtype,
+            token_budget=token_budget,
+            max_batch=max_batch,
+            max_length=max_length,
+            log_prefix=f"[stream {shard['id']}] ",
+        )
+        shard_path = write_vectors_shard(
+            output_dir / f"shard_{int(shard['id']):05d}.h5",
+            buf,
+            shard,
+            dim=dim,
+            vector_dtype=vector_dtype,
+            normalize=normalize,
+            source_text_h5=input_h5,
+            local_model=local_model,
+            compression=compression,
+            gzip_level=gzip_level,
+            stage_dir=output_dir,
+            rows_per_chunk=rows_per_chunk,
+        )
+        shard["embed_status"] = STREAM_EMBED_DONE
+        shard["source"] = STREAM_SOURCE_STREAM
+        write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+        remote_path = stream_remote_shard_path(cloud_stream_dir, shard["id"])
+        move_overwrite(shard_path, remote_path)
+        ok, reason, verify = validate_shard_file(remote_path, shard, dim, vector_dtype)
+        if not ok:
+            shard["upload_status"] = STREAM_UPLOAD_FAILED
+            shard["verify"] = {"error": reason}
+            write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+            print(f"embed_incloud: shard {shard['id']} verify failed: {reason}", flush=True)
+            continue
+        shard["upload_status"] = STREAM_UPLOAD_DONE
+        shard["bytes"] = int(remote_path.stat().st_size)
+        shard["verify"] = verify
+        shard["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+        del buf
+        if str(embedder.device).startswith("cuda"):
+            gc.collect()
+            torch.cuda.empty_cache()
+        print(f"embed_incloud: shard {shard['id']} streamed to Drive", flush=True)
+
+    if all(shard.get("upload_status") == STREAM_UPLOAD_DONE for shard in shards):
+        manifest["status"] = STREAM_STATUS_COMPLETE
+        manifest["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        write_json_via_move(manifest, stream_manifest_file, stage_dir=output_dir, backup_path=stream_manifest_backup)
+    print(f"embed_incloud: stream run complete -> {stream_manifest_file}", flush=True)
+    return stream_manifest_file
+
+
+def embed_incloud(
+    input_h5: Path = DEFAULT_INPUT_H5,
+    output_h5: Path = DEFAULT_OUTPUT_H5,
+    local_model: str = DEFAULT_LOCAL_MODEL,
+    device: str | None = None,
+    batch_size: int = 256,
+    max_length: int = 2048,
+    attn_impl: str = "auto",
+    normalize: bool = False,
+    sort: bool = True,
+    tok_workers: int = 4,
+    prefetch: int = 8,
+    dtype: str = "float16",
+    chunk_rows: int = 2048,
+    compression: str = "none",
+    gzip_level: int = 1,
+    shard_size: int = DEFAULT_SHARD_SIZE,
+    token_budget: int = 131072,
+    max_batch: int = 8192,
+    overwrite: bool = False,
+    output_dir: Path | None = None,
+    cloud_stream_dir: Path | None = None,
+    free_floor_bytes: int = 8 * 1024**3,
+) -> Path:
+    """Public entry point: one-file default, cloud stream when requested."""
+    if cloud_stream_dir is not None:
+        return stream_cloud_output(
+            input_h5=input_h5,
+            output_h5=output_h5,
+            local_model=local_model,
+            device=device,
+            batch_size=batch_size,
+            max_length=max_length,
+            attn_impl=attn_impl,
+            normalize=normalize,
+            sort=sort,
+            tok_workers=tok_workers,
+            prefetch=prefetch,
+            dtype=dtype,
+            chunk_rows=chunk_rows,
+            compression=compression,
+            gzip_level=gzip_level,
+            shard_size=shard_size,
+            token_budget=token_budget,
+            max_batch=max_batch,
+            overwrite=overwrite,
+            output_dir=output_dir,
+            cloud_stream_dir=cloud_stream_dir,
+            free_floor_bytes=free_floor_bytes,
+        )
+    return one_file_output(
+        input_h5=input_h5,
+        output_h5=output_h5,
+        local_model=local_model,
+        device=device,
+        batch_size=batch_size,
+        max_length=max_length,
+        attn_impl=attn_impl,
+        normalize=normalize,
+        sort=sort,
+        tok_workers=tok_workers,
+        prefetch=prefetch,
+        dtype=dtype,
+        chunk_rows=chunk_rows,
+        compression=compression,
+        gzip_level=gzip_level,
+        shard_size=shard_size,
+        token_budget=token_budget,
+        max_batch=max_batch,
+        overwrite=overwrite,
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input-h5", type=Path, default=DEFAULT_INPUT_H5)
     parser.add_argument("--output-h5", type=Path, default=DEFAULT_OUTPUT_H5)
+    parser.add_argument("--output-dir", type=Path, default=None, help="local temporary output directory")
+    parser.add_argument("--cloud-stream-dir", type=Path, default=None, help="Drive directory for streamed shards")
     parser.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL)
     parser.add_argument("--device", default=None)
     parser.add_argument(
@@ -598,6 +1382,7 @@ def parse_args():
         type=int,
         help="sentences per shard/checkpoint (aligned down to a multiple of --chunk-rows)",
     )
+    parser.add_argument("--free-floor-bytes", default=8 * 1024**3, type=int, help="minimum free local bytes before work continues")
     parser.add_argument("--overwrite", action="store_true", help="discard any resume state and recompute")
     return parser.parse_args()
 
@@ -624,6 +1409,9 @@ def main():
         token_budget=args.token_budget,
         max_batch=args.max_batch,
         overwrite=args.overwrite,
+        output_dir=args.output_dir,
+        cloud_stream_dir=args.cloud_stream_dir,
+        free_floor_bytes=args.free_floor_bytes,
     )
 
 
