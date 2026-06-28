@@ -225,6 +225,20 @@ def main():
         else:
             pending.append(str(appid))
 
+    # Up-front scan of the local cache: anything already on disk is served
+    # without touching the Steam API. Lets you confirm a persisted cache is
+    # being reused instead of silently re-fetching.
+    cached_hits = sum(
+        1 for appid in pending
+        if cache_payload_path(args.cache_dir, appid, args.language, args.filters).exists()
+        and not args.overwrite_cache
+    )
+    print(
+        f"enrich: games={len(appids)} already_complete={skipped} pending={len(pending)} "
+        f"| cache_dir={args.cache_dir} cached={cached_hits} need_api={len(pending) - cached_hits}",
+        flush=True,
+    )
+
     fetched = changed = failed = processed = 0
     batch_size = max(1, int(args.batch_size))
     for start in range(0, len(pending), batch_size):

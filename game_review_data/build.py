@@ -443,6 +443,8 @@ def download_and_prepare_kaggle(args, source2_dir: Path, kaggle_cache: Path) -> 
             str(args.enrich_retry_sleep),
             "--retries",
             str(args.enrich_retries),
+            "--cache-dir",
+            str(args.enrich_cache_dir),
         ]
         if args.overwrite:
             enrich_cmd.append("--overwrite-cache")
@@ -506,6 +508,13 @@ def parse_args():
     parser.add_argument("--strict-length", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strict-count", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enrich-batch-size", type=int, default=1)
+    parser.add_argument(
+        "--enrich-cache-dir",
+        type=Path,
+        default=SCRIPT_DIR / "_steam_appdetails_cache",
+        help="Persistent Steam appdetails cache, kept OUTSIDE --data-dir so "
+             "wiping the data dir does not force re-fetching from the API.",
+    )
     parser.add_argument("--enrich-sleep", type=float, default=2.0)
     parser.add_argument("--enrich-retry-sleep", type=float, default=10.0)
     parser.add_argument("--enrich-retries", type=int, default=5)
@@ -550,6 +559,7 @@ def parse_args():
 
 def resolve_args_paths(args: argparse.Namespace) -> argparse.Namespace:
     args.data_dir = Path(args.data_dir).expanduser().resolve()
+    args.enrich_cache_dir = Path(args.enrich_cache_dir).expanduser().resolve()
     if args.kaggle_input is not None:
         args.kaggle_input = Path(args.kaggle_input).expanduser().resolve()
     if args.text_h5 is not None:
