@@ -10,13 +10,17 @@ object per game:
 review_id is the 0-based index of the review in the source array (so the original
 text is recoverable as source[int(review_id)]); reviews that yield no sentence are
 omitted. Reviews are fed to the wtpsplit SaT splitter in fixed-size chunks so GPU
-memory stays bounded on games with very many reviews.
+memory stays bounded on games with very many reviews. When ``--chunk-budget 0`` is
+used, the script inspects total system RAM and selects one of the internal budget
+tiers automatically.
 """
 
 import argparse
+import ctypes
 import json
 import re
 import time
+import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -24,7 +28,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = SCRIPT_DIR / "game_review_metadata"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "game_review_sentences"
 DEFAULT_MODEL = "sat-3l-sm"
-DEFAULT_CHUNK_SIZE = 2000
+DEFAULT_CHUNK_BUDGET = 0
+
+AUTO_BUDGET_TIERS = (
+    (32, 320_000),
+    (64, 640_000),
+    (80, 800_000),
+    (100, 1_000_000),
+    (150, 1_500_000),
+    (200, 2_000_000),
+)
 
 
 def replace_with_retry(tmp_path: Path, output_path: Path, attempts: int = 8) -> None:
@@ -65,15 +78,91 @@ def _clear_cuda_cache(device):
             pass
 
 
-def split_reviews_into_mapping(reviews, splitter, chunk_size, device):
+def get_total_system_ram_gib() -> float | None:
+    try:
+        if os.name == "nt":
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = MEMORYSTATUSEX()
+            status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return status.ullTotalPhys / (1024 ** 3)
+
+        if hasattr(os, "sysconf") and "SC_PHYS_PAGES" in os.sysconf_names:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if pages > 0 and page_size > 0:
+                return (pages * page_size) / (1024 ** 3)
+    except Exception:
+        return None
+    return None
+
+
+def choose_auto_chunk_budget(total_ram_gib: float | None) -> tuple[int, int | None]:
+    if total_ram_gib is None:
+        return AUTO_BUDGET_TIERS[0][1], None
+
+    if total_ram_gib < 48:
+        tier = 32
+    elif total_ram_gib < 72:
+        tier = 64
+    elif total_ram_gib < 90:
+        tier = 80
+    elif total_ram_gib < 125:
+        tier = 100
+    elif total_ram_gib < 175:
+        tier = 150
+    else:
+        tier = 200
+
+    return tier * 10_000, tier
+
+
+def resolve_chunk_budget(chunk_budget):
+    if chunk_budget and chunk_budget > 0:
+        return int(chunk_budget), None, None
+
+    total_ram_gib = get_total_system_ram_gib()
+    resolved_budget, tier_gib = choose_auto_chunk_budget(total_ram_gib)
+    return resolved_budget, tier_gib, total_ram_gib
+
+
+def iter_review_chunks(normalized_reviews, chunk_budget):
+    chunk = []
+    used = 0
+    for review in normalized_reviews:
+        cost = max(1, len(review))
+        if chunk and used + cost > chunk_budget:
+            yield chunk
+            chunk = []
+            used = 0
+        chunk.append(review)
+        used += cost
+    if chunk:
+        yield chunk
+
+
+def split_reviews_into_mapping(reviews, splitter, device, chunk_budget):
     """Return (mapping, sentence_count). mapping keeps review_id -> sentence_id ->
     {sentence_text}; review_id is the source-array index."""
     normalized = [normalize_text(review) for review in reviews]
 
     mapping = {}
     sentence_count = 0
-    for start in range(0, len(normalized), chunk_size):
-        chunk = normalized[start : start + chunk_size]
+    start = 0
+    for chunk in iter_review_chunks(normalized, chunk_budget):
         for local_index, review_sentences in enumerate(
             split_chunk_with_fallback(chunk, splitter, start, device)
         ):
@@ -88,7 +177,7 @@ def split_reviews_into_mapping(reviews, splitter, chunk_size, device):
             if sentences:
                 mapping[str(review_id)] = sentences
                 sentence_count += sid
-        _clear_cuda_cache(device)
+        start += len(chunk)
     return mapping, sentence_count
 
 
@@ -128,7 +217,7 @@ def split_chunk_with_fallback(chunk, splitter, start_index, device):
 
 
 def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
-               chunk_size=DEFAULT_CHUNK_SIZE, overwrite=False, splitter=None):
+               chunk_budget=DEFAULT_CHUNK_BUDGET, overwrite=False, splitter=None):
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -140,8 +229,21 @@ def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
     if splitter is None:
         splitter = load_splitter(model, device)
 
-    print(f"split_data: {len(input_files)} files, model={model}, device={device} -> {output_dir}", flush=True)
+    resolved_budget, tier_gib, total_ram_gib = resolve_chunk_budget(chunk_budget)
+    if tier_gib is None:
+        budget_note = f"chunk_budget={resolved_budget}"
+    else:
+        budget_note = (
+            f"chunk_budget=auto({int(total_ram_gib or 0)}GiB->tier{tier_gib}G,"
+            f"budget={resolved_budget})"
+        )
+    print(
+        f"split_data: {len(input_files)} files, model={model}, device={device}, "
+        f"{budget_note} -> {output_dir}",
+        flush=True,
+    )
     skipped_existing = 0
+
     for file_index, input_path in enumerate(input_files, start=1):
         output_path = output_dir / input_path.name
         if output_path.exists() and not overwrite:
@@ -157,7 +259,12 @@ def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
             print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (not a list)", flush=True)
             continue
 
-        mapping, sentence_count = split_reviews_into_mapping(reviews, splitter, chunk_size, device)
+        mapping, sentence_count = split_reviews_into_mapping(
+            reviews,
+            splitter,
+            device,
+            chunk_budget=resolved_budget,
+        )
 
         tmp_path = output_path.with_suffix(".json.tmp")
         with tmp_path.open("w", encoding="utf-8") as file:
@@ -180,7 +287,12 @@ def parse_args():
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default=DEFAULT_MODEL, help="wtpsplit SaT model name.")
     parser.add_argument("--device", default=None, help="e.g. 'cuda' or 'cpu'.")
-    parser.add_argument("--chunk-size", default=DEFAULT_CHUNK_SIZE, type=int)
+    parser.add_argument(
+        "--chunk-budget",
+        default=DEFAULT_CHUNK_BUDGET,
+        type=int,
+        help="Approximate character budget per SaT chunk; 0 auto-selects a tier from total system RAM.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -192,7 +304,7 @@ def main():
         args.output_dir,
         model=args.model,
         device=args.device,
-        chunk_size=args.chunk_size,
+        chunk_budget=args.chunk_budget,
         overwrite=args.overwrite,
     )
 

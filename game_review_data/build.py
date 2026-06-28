@@ -230,6 +230,7 @@ DEFAULT_DATA_DIR = SCRIPT_DIR
 DEFAULT_TEXT_H5 = DEFAULT_DATA_DIR / "text_h5.h5"
 DEFAULT_EMBEDDING_H5 = DEFAULT_DATA_DIR / "embedding_h5.h5"
 DEFAULT_TAG_MAPPING = PROJECT_ROOT / "VICReg_review" / "tags" / "tag_mapping.json"
+DEFAULT_KAGGLE_GAMES_JSON = SCRIPT_DIR / "kaggle_storepage_data" / "games.json"
 
 PIPELINE_STAGES = ("metadata", "split", "text-h5", "embed-h5")
 
@@ -395,18 +396,13 @@ def find_cached_kaggle_dataset(kaggle_cache: Path) -> Path | None:
 
 
 def maybe_enrich_kaggle(args, prepared_dir: Path) -> None:
-    if args.kaggle_games_json is not None:
-        print(
-            f"source2: skip enrich because --kaggle-games-json was provided: {args.kaggle_games_json}",
-            flush=True,
-        )
-        return
-
     enrich_cmd = [
         str(args.python),
         str(SCRIPT_DIR / "enrich_steam_store_metadata.py"),
         "--games-json",
         str(prepared_dir / "games.json"),
+        "--output-json",
+        str(args.kaggle_games_json),
         "--batch-size",
         str(args.enrich_batch_size),
         "--sleep",
@@ -540,9 +536,9 @@ def parse_args():
     parser.add_argument(
         "--kaggle-games-json",
         type=Path,
-        default=None,
-        help="Path to a saved, already-enriched source2 games.json. When given, "
-             "prepare seeds metadata from it so enrich skips the Steam API.",
+        default=DEFAULT_KAGGLE_GAMES_JSON,
+        help="Path to the saved source2 games.json used as the enrich output "
+             "location and as a seed when rebuilding Kaggle metadata.",
     )
 
     parser.add_argument("--prepare-chunksize", type=int, default=200_000)
@@ -565,7 +561,7 @@ def parse_args():
 
     parser.add_argument("--split-model", default="sat-3l-sm")
     parser.add_argument("--split-device", default=None)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--chunk-budget", type=int, default=0)
 
     parser.add_argument("--text-h5", type=Path, default=None)
     parser.add_argument("--embedding-h5", type=Path, default=None)
@@ -655,7 +651,9 @@ def main():
             s2_reviews = source2_dir / "reviews"
             if s2_reviews.exists() and any(s2_reviews.glob("*.csv")):
                 review_dirs.append(s2_reviews)
-            s2_games_json = source2_dir / "games.json"
+            s2_games_json = args.kaggle_games_json
+            if not s2_games_json.exists():
+                s2_games_json = source2_dir / "games.json"
             if s2_games_json.exists():
                 games_json_sources.append(s2_games_json)
 
@@ -712,7 +710,7 @@ def main():
             output_dir=sentences_dir,
             model=args.split_model,
             device=args.split_device,
-            chunk_size=args.chunk_size,
+            chunk_budget=args.chunk_budget,
             overwrite=args.overwrite,
         )
 

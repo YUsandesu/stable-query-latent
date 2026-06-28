@@ -79,6 +79,15 @@ DEFAULT_OUTPUT_H5 = DEFAULT_EMBEDDING_H5
 DEFAULT_LOCAL_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_BACKEND = "local_incloud"
 DEFAULT_SHARD_SIZE = 2_000_000
+CPU_DEFAULT_TOKEN_BUDGET = 131072
+VRAM_TOKEN_BUDGET_TIERS = (
+    (16, 65536),
+    (32, 131072),
+    (48, 196608),
+    (80, 327680),
+    (100, 393216),
+    (120, 458752),
+)
 MANIFEST_SCHEMA = "embedding_incloud.manifest.v1"
 STREAM_MANIFEST_SCHEMA = "embedding_stream.manifest.v1"
 STREAM_STATUS_IN_PROGRESS = "in_progress"
@@ -543,6 +552,37 @@ def build_batches(order, lengths, batch_size, token_budget, max_batch):
     return batches
 
 
+def detect_available_gib(device: str | None) -> float | None:
+    """Return currently available CUDA memory in GiB, or None for non-CUDA."""
+    if not device or not str(device).startswith("cuda"):
+        return None
+    import torch
+
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info(device=None)
+    except TypeError:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+    return float(free_bytes) / (1024**3)
+
+
+def auto_token_budget(
+    *,
+    device: str | None,
+    requested: int,
+) -> tuple[int, str]:
+    """Pick a token budget tier from the available GPU memory."""
+    requested = int(requested)
+    if requested > 0:
+        return requested, "fixed"
+    free_gib = detect_available_gib(device)
+    if free_gib is None:
+        return int(CPU_DEFAULT_TOKEN_BUDGET), "cpu-default"
+    for limit_gib, budget in VRAM_TOKEN_BUDGET_TIERS:
+        if free_gib <= limit_gib:
+            return int(budget), f"tier<= {limit_gib}GiB ({free_gib:.1f} GiB free)"
+    return 524288, f"tier>120GiB ({free_gib:.1f} GiB free)"
+
+
 def embed_index_range(
     texts,
     start,
@@ -730,7 +770,7 @@ def one_file_output(
     compression: str = "none",
     gzip_level: int = 1,
     shard_size: int = DEFAULT_SHARD_SIZE,
-    token_budget: int = 131072,
+    token_budget: int = 0,
     max_batch: int = 8192,
     overwrite: bool = False,
 ) -> Path:
@@ -766,6 +806,10 @@ def one_file_output(
     dim = embedder.embedding_dim
     vector_dtype = np.dtype(dtype)
     torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
+    token_budget, token_budget_mode = auto_token_budget(
+        device=embedder.device,
+        requested=token_budget,
+    )
 
     rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
     shard_size = max(rows_per_chunk, (max(1, int(shard_size)) // rows_per_chunk) * rows_per_chunk)
@@ -810,7 +854,7 @@ def one_file_output(
     shards = manifest["shards"]
     pending = [s for s in shards if s["status"] != "done"]
     batching = (
-        f"token_budget≈{token_budget} max_batch={max_batch}" if token_budget and token_budget > 0
+        f"token_budget≈{token_budget} ({token_budget_mode}) max_batch={max_batch}" if token_budget and token_budget > 0
         else f"fixed batch_size={batch_size}"
     )
     print(
@@ -1048,7 +1092,7 @@ def stream_cloud_output(
     compression: str = "none",
     gzip_level: int = 1,
     shard_size: int = DEFAULT_SHARD_SIZE,
-    token_budget: int = 131072,
+    token_budget: int = 0,
     max_batch: int = 8192,
     overwrite: bool = False,
     output_dir: Path | None = None,
@@ -1092,6 +1136,10 @@ def stream_cloud_output(
     dim = embedder.embedding_dim
     vector_dtype = np.dtype(dtype)
     torch_out_dtype = torch.float16 if vector_dtype == np.float16 else torch.float32
+    token_budget, token_budget_mode = auto_token_budget(
+        device=embedder.device,
+        requested=token_budget,
+    )
     rows_per_chunk = max(1, min(int(chunk_rows), total_sentences))
     shard_size = max(rows_per_chunk, (max(1, int(shard_size)) // rows_per_chunk) * rows_per_chunk)
     manifest = stream_manifest_initial_state(
@@ -1122,7 +1170,7 @@ def stream_cloud_output(
     shards = manifest["shards"]
     print(
         f"embed_incloud: stream mode -> {len(shards)} shards total "
-        f"(shard_size={shard_size}, free_floor={free_floor_bytes})",
+        f"(shard_size={shard_size}, free_floor={free_floor_bytes}, token_budget={token_budget} {token_budget_mode})",
         flush=True,
     )
 
@@ -1278,7 +1326,7 @@ def embed_incloud(
     compression: str = "none",
     gzip_level: int = 1,
     shard_size: int = DEFAULT_SHARD_SIZE,
-    token_budget: int = 131072,
+    token_budget: int = 0,
     max_batch: int = 8192,
     overwrite: bool = False,
     output_dir: Path | None = None,
@@ -1350,10 +1398,9 @@ def parse_args():
     )
     parser.add_argument(
         "--token-budget",
-        default=131072,
+        default=0,
         type=int,
-        help="hard cap on real tokens/batch for dynamic batching (0 disables -> fixed "
-        "--batch-size); raise it until GPU memory is ~70%% full",
+        help="tokens/batch; 0 auto-picks a VRAM tier after the model loads, non-zero locks the value",
     )
     parser.add_argument(
         "--max-batch",

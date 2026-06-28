@@ -37,7 +37,7 @@ def parse_args():
 
     parser.add_argument("--split-model", default="sat-3l-sm")
     parser.add_argument("--split-device", default=None)
-    parser.add_argument("--chunk-size", default=2000, type=int)
+    parser.add_argument("--chunk-budget", default=0, type=int)
 
     parser.add_argument("--text-h5", type=Path, default=None)
     parser.add_argument("--embedding-h5", type=Path, default=None)
@@ -101,7 +101,7 @@ def main():
             output_dir=sentences_dir,
             model=args.split_model,
             device=args.split_device,
-            chunk_size=args.chunk_size,
+            chunk_budget=args.chunk_budget,
             overwrite=args.overwrite,
         )
 

@@ -24,6 +24,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_DATASET = "andrewmvd/steam-reviews"
 DEFAULT_PREPARED_DIR = SCRIPT_DIR / "kaggle_steam_reviews_prepared"
+DEFAULT_KAGGLE_GAMES_JSON = SCRIPT_DIR / "kaggle_storepage_data" / "games.json"
 DEFAULT_WORKDIR = SCRIPT_DIR / "build_2_gamedata"
 DEFAULT_KAGGLE_CACHE = SCRIPT_DIR / "kagglehub_cache"
 STAGES = ("metadata", "split", "text-h5", "embed-h5")
@@ -80,8 +81,8 @@ def build_pipeline(args) -> None:
         str(args.min_count),
         "--split-model",
         args.split_model,
-        "--chunk-size",
-        str(args.chunk_size),
+        "--chunk-budget",
+        str(args.chunk_budget),
         "--backend",
         args.backend,
         "--local-model",
@@ -129,6 +130,7 @@ def parse_args():
     parser.add_argument("--kaggle-input", type=Path, default=None,
                         help="Existing Kaggle CSV/dir. If omitted, kagglehub downloads the dataset.")
     parser.add_argument("--prepared-dir", type=Path, default=DEFAULT_PREPARED_DIR)
+    parser.add_argument("--kaggle-games-json", type=Path, default=DEFAULT_KAGGLE_GAMES_JSON)
     parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-download", action="store_true")
@@ -157,7 +159,7 @@ def parse_args():
     # split/embed H5
     parser.add_argument("--split-model", default="sat-3l-sm")
     parser.add_argument("--split-device", default=None)
-    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--chunk-budget", type=int, default=0)
     parser.add_argument("--backend", choices=["local", "cloud"], default="cloud")
     parser.add_argument("--local-model", default="Qwen/Qwen3-Embedding-0.6B")
     parser.add_argument("--embed-device", default=None)
@@ -177,6 +179,7 @@ def parse_args():
 def main():
     args = parse_args()
     args.prepared_dir = Path(args.prepared_dir)
+    args.kaggle_games_json = Path(args.kaggle_games_json)
     args.workdir = Path(args.workdir)
 
     kaggle_input = args.kaggle_input
@@ -221,6 +224,8 @@ def main():
             str(SCRIPT_DIR / "enrich_steam_store_metadata.py"),
             "--games-json",
             str(args.prepared_dir / "games.json"),
+            "--output-json",
+            str(args.kaggle_games_json),
             "--batch-size",
             str(args.enrich_batch_size),
             "--sleep",
