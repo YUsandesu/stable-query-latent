@@ -373,7 +373,9 @@ def iter_chunk_records(input_path: Path, schema: dict[str, str | None], args):
     from concurrent.futures import ProcessPoolExecutor
 
     min_length, strict = args.min_length, args.strict_length
-    max_inflight = workers * 2
+    # Keep only a few chunks beyond the worker count in flight: enough to keep
+    # the pool fed, small enough that buffered chunks don't blow up memory.
+    max_inflight = workers + 2
     chunk_index = 0
     pending: collections.deque = collections.deque()
     exhausted = False
@@ -592,7 +594,10 @@ def main():
     args.output_dir = Path(args.output_dir)
     if args.workers <= 0:
         import os
-        args.workers = os.cpu_count() or 1
+        # The single-threaded CSV reader in the main process is the throughput
+        # ceiling, so a modest pool is plenty; capping avoids hundreds of forked
+        # workers (and their in-flight chunk buffers) on high-core cloud boxes.
+        args.workers = min(os.cpu_count() or 1, 16)
     print(f"prepare: using {args.workers} filter worker(s)", flush=True)
     if args.finalize_existing:
         finalize_existing_outputs(args)
