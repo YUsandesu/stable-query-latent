@@ -21,6 +21,7 @@ import json
 import re
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -30,13 +31,11 @@ DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "game_review_sentences"
 DEFAULT_MODEL = "sat-3l-sm"
 DEFAULT_CHUNK_BUDGET = 0
 
-AUTO_BUDGET_TIERS = (
+AUTO_BUDGET_POINTS = (
     (32, 320_000),
-    (64, 640_000),
-    (80, 800_000),
-    (100, 1_000_000),
-    (150, 1_500_000),
-    (200, 2_000_000),
+    (64, 1_280_000),
+    (125, 6_250_000),
+    (250, 12_500_000),
 )
 
 
@@ -49,6 +48,21 @@ def replace_with_retry(tmp_path: Path, output_path: Path, attempts: int = 8) -> 
             if attempt == attempts - 1:
                 raise
             time.sleep(0.25 * (attempt + 1))
+
+
+def read_reviews_normalized(input_path: Path):
+    with input_path.open("r", encoding="utf-8-sig") as file:
+        reviews = json.load(file)
+    if isinstance(reviews, list):
+        return [normalize_text(review) for review in reviews]
+    return reviews
+
+
+def write_sentence_mapping(output_path: Path, mapping) -> None:
+    tmp_path = output_path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as file:
+        json.dump(mapping, file, ensure_ascii=False)
+    replace_with_retry(tmp_path, output_path)
 
 
 def normalize_text(text):
@@ -112,22 +126,22 @@ def get_total_system_ram_gib() -> float | None:
 
 def choose_auto_chunk_budget(total_ram_gib: float | None) -> tuple[int, int | None]:
     if total_ram_gib is None:
-        return AUTO_BUDGET_TIERS[0][1], None
+        return AUTO_BUDGET_POINTS[0][1], None
 
-    if total_ram_gib < 48:
-        tier = 32
-    elif total_ram_gib < 72:
-        tier = 64
-    elif total_ram_gib < 90:
-        tier = 80
-    elif total_ram_gib < 125:
-        tier = 100
-    elif total_ram_gib < 175:
-        tier = 150
-    else:
-        tier = 200
+    ram_gib = max(float(total_ram_gib), float(AUTO_BUDGET_POINTS[0][0]))
+    for (left_ram, left_budget), (right_ram, right_budget) in zip(
+        AUTO_BUDGET_POINTS, AUTO_BUDGET_POINTS[1:]
+    ):
+        if ram_gib <= right_ram:
+            fraction = (ram_gib - left_ram) / (right_ram - left_ram)
+            budget = left_budget + fraction * (right_budget - left_budget)
+            return int(round(budget)), int(round(ram_gib))
 
-    return tier * 10_000, tier
+    left_ram, left_budget = AUTO_BUDGET_POINTS[-2]
+    right_ram, right_budget = AUTO_BUDGET_POINTS[-1]
+    slope = (right_budget - left_budget) / (right_ram - left_ram)
+    budget = right_budget + (ram_gib - right_ram) * slope
+    return int(round(budget)), int(round(ram_gib))
 
 
 def resolve_chunk_budget(chunk_budget):
@@ -158,7 +172,16 @@ def split_reviews_into_mapping(reviews, splitter, device, chunk_budget):
     """Return (mapping, sentence_count). mapping keeps review_id -> sentence_id ->
     {sentence_text}; review_id is the source-array index."""
     normalized = [normalize_text(review) for review in reviews]
+    return split_normalized_reviews_into_mapping(
+        normalized,
+        splitter,
+        device,
+        chunk_budget,
+    )
 
+
+def split_normalized_reviews_into_mapping(normalized, splitter, device, chunk_budget):
+    """Return (mapping, sentence_count) for reviews already normalized."""
     mapping = {}
     sentence_count = 0
     start = 0
@@ -242,42 +265,76 @@ def split_data(input_dir, output_dir, model=DEFAULT_MODEL, device=None,
         f"{budget_note} -> {output_dir}",
         flush=True,
     )
-    skipped_existing = 0
 
+    skipped_existing = 0
+    process_files = []
     for file_index, input_path in enumerate(input_files, start=1):
         output_path = output_dir / input_path.name
         if output_path.exists() and not overwrite:
             skipped_existing += 1
             continue
-        if skipped_existing:
-            print(f"skip existing sentence JSON files: {skipped_existing}", flush=True)
-            skipped_existing = 0
+        process_files.append((file_index, input_path, output_path))
 
-        with input_path.open("r", encoding="utf-8") as file:
-            reviews = json.load(file)
-        if not isinstance(reviews, list):
-            print(f"[{file_index}/{len(input_files)}] {input_path.name}: skip (not a list)", flush=True)
-            continue
-
-        mapping, sentence_count = split_reviews_into_mapping(
-            reviews,
-            splitter,
-            device,
-            chunk_budget=resolved_budget,
-        )
-
-        tmp_path = output_path.with_suffix(".json.tmp")
-        with tmp_path.open("w", encoding="utf-8") as file:
-            json.dump(mapping, file, ensure_ascii=False)
-        replace_with_retry(tmp_path, output_path)
-
-        print(
-            f"[{file_index}/{len(input_files)}] {input_path.name}: "
-            f"{len(reviews)} reviews -> {len(mapping)} non-empty, {sentence_count} sentences",
-            flush=True,
-        )
     if skipped_existing:
         print(f"skip existing sentence JSON files: {skipped_existing}", flush=True)
+
+    pending_writes = []
+
+    def finish_oldest_write():
+        future, message = pending_writes.pop(0)
+        future.result()
+        print(message, flush=True)
+
+    with (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="split-read") as read_pool,
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="split-write") as write_pool,
+    ):
+        read_future = (
+            read_pool.submit(read_reviews_normalized, process_files[0][1])
+            if process_files
+            else None
+        )
+
+        for process_index, (file_index, input_path, output_path) in enumerate(process_files):
+            reviews = read_future.result()
+            next_index = process_index + 1
+            read_future = (
+                read_pool.submit(read_reviews_normalized, process_files[next_index][1])
+                if next_index < len(process_files)
+                else None
+            )
+
+            if not isinstance(reviews, list):
+                print(
+                    f"[{file_index}/{len(input_files)}] {input_path.name}: skip (not a list)",
+                    flush=True,
+                )
+                continue
+
+            mapping, sentence_count = split_normalized_reviews_into_mapping(
+                reviews,
+                splitter,
+                device,
+                chunk_budget=resolved_budget,
+            )
+
+            pending_writes.append(
+                (
+                    write_pool.submit(write_sentence_mapping, output_path, mapping),
+                    (
+                        f"[{file_index}/{len(input_files)}] {input_path.name}: "
+                        f"{len(reviews)} reviews -> {len(mapping)} non-empty, "
+                        f"{sentence_count} sentences"
+                    ),
+                )
+            )
+
+            while len(pending_writes) >= 2:
+                finish_oldest_write()
+
+        while pending_writes:
+            finish_oldest_write()
+
     print(f"Done. Sentence JSON written to {output_dir}", flush=True)
 
 
