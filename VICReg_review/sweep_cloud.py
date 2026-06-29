@@ -6,20 +6,19 @@ resume behavior, but replaces the local Windows training command defaults:
 * full sweep grid by default: N increases by --train-game-step up to the H5
   pool, then adds full, views=0.8/0.6/0.4/0.2, dims=18/36/72,
   arms=grl/nogrl.
-* full-window training defaults to split_recompute. It is usually the best
-  A100 path for this heavy-tailed review corpus because it keeps long-game
-  memory bounded while avoiding a full-model replay through the latent tail.
+* full-window training defaults to auto backward mode: try standard first for
+  A100 throughput, then retry CUDA OOM combinations with split_recompute.
 * paired GRL/no-GRL training is attempted by default on fresh combinations.
 * periodic in-training probes are disabled by default for throughput. Enable
-  --train-probe-every when you want learning curves; final per-combo evaluation
-  still runs through run_data_view_sweep.py unless --skip-eval is set.
-  sentiment, recommendation, anchor TAG generalization, and real-text TAG/cosine
-  behavior.
+  --train-probe-every when you want learning curves. The expensive raw-Qwen /
+  VICReg comparison runs once at the end on the best full-train checkpoint by
+  default; use --eval-mode per_combo for the old behavior.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -35,12 +34,26 @@ from VICReg_review import run_data_view_sweep as sweep
 DEFAULT_OUT_DIR = SCRIPT_DIR / "heads" / "cloud_full_sweep"
 DEFAULT_PYTHON = Path(sys.executable)
 DEFAULT_TEXT_VARIANT_DIR = ROOT
+DEFAULT_DESCRIPTIONS_DIR = SCRIPT_DIR / "tags" / "game_descriptions"
 
 
 _BASE_BUILD_TRAIN_COMMAND = sweep.build_train_command
 _BASE_BUILD_PAIRED_TRAIN_COMMAND = sweep.build_paired_train_command
 _BASE_SHOULD_TRY_PAIRED_TRAINING = sweep.should_try_paired_training
+_BASE_RUN_COMMAND = sweep.run_command
 _PAIRED_MODE = "always"
+_STANDARD_OOM_RULES: list[tuple[int, float]] = []
+_STANDARD_OOM_RETRY = True
+_STANDARD_OOM_FALLBACK = "split_recompute"
+_VRAM_FALLBACK_REPORTED = False
+AUTO_FULL_PASS_MIN_TOTAL_VRAM_GIB = 60.0
+AUTO_FULL_PASS_MIN_FREE_VRAM_GIB = 50.0
+AUTO_STEP_TIERS = (
+    (100.0, 0),
+    (70.0, 0),
+    (40.0, 8),
+    (20.0, 4),
+)
 
 
 def _set_option(cmd: list[str], option: str, value) -> None:
@@ -58,12 +71,216 @@ def _append_flag(cmd: list[str], flag: str, enabled: bool) -> None:
         cmd.append(flag)
 
 
-def _apply_cloud_train_options(cmd: list[str], args) -> list[str]:
+def _extract_option(cmd: list[str], option: str) -> str | None:
+    try:
+        index = cmd.index(option)
+    except ValueError:
+        return None
+    if index + 1 >= len(cmd):
+        return None
+    return str(cmd[index + 1])
+
+
+def _cuda_memory_gib(device_text: str | None) -> tuple[float, float] | None:
+    device_text = str(device_text or "")
+    if not device_text.startswith("cuda"):
+        return None
+    torch = sweep.torch
+    if not torch.cuda.is_available():
+        return None
+    try:
+        if ":" in device_text:
+            device_index = int(device_text.split(":", 1)[1])
+        else:
+            device_index = torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(device_index)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device_index)
+        total_bytes = max(int(total_bytes), int(props.total_memory))
+        return free_bytes / 1024**3, total_bytes / 1024**3
+    except (RuntimeError, ValueError) as exc:
+        print(f"auto backward-mode: could not read CUDA memory for {device_text!r}: {exc}", flush=True)
+        return None
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        return int(Path(path).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _system_memory_gib() -> tuple[float | None, float | None]:
+    """Return (available/free-ish, total) RAM in GiB, respecting cgroup limits when visible."""
+    page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else None
+    phys_pages = os.sysconf("SC_PHYS_PAGES") if hasattr(os, "sysconf") else None
+    avail_pages = os.sysconf("SC_AVPHYS_PAGES") if hasattr(os, "sysconf") else None
+    total_bytes = int(page_size * phys_pages) if page_size and phys_pages else None
+    avail_bytes = int(page_size * avail_pages) if page_size and avail_pages else None
+
+    cgroup_limit = _read_int_file("/sys/fs/cgroup/memory.max")
+    if cgroup_limit is None:
+        cgroup_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if cgroup_limit is not None and 0 < cgroup_limit < (1 << 60):
+        total_bytes = min(total_bytes, cgroup_limit) if total_bytes else cgroup_limit
+        current = _read_int_file("/sys/fs/cgroup/memory.current")
+        if current is None:
+            current = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        if current is not None:
+            avail_bytes = max(0, cgroup_limit - current)
+
+    if total_bytes is None:
+        return None, None
+    if avail_bytes is None:
+        avail_bytes = total_bytes
+    return avail_bytes / 1024**3, total_bytes / 1024**3
+
+
+def _steps_for_resource_gib(resource_gib: float) -> int:
+    for threshold_gib, steps in AUTO_STEP_TIERS:
+        if resource_gib >= threshold_gib:
+            return steps
+    return 4
+
+
+def resolve_auto_steps_per_epoch(args) -> None:
+    if args.steps_per_epoch is not None:
+        return
+
+    cuda_memory = _cuda_memory_gib(args.device)
+    ram_free_gib, ram_total_gib = _system_memory_gib()
+    resource_candidates = []
+    if cuda_memory is not None:
+        gpu_free_gib, gpu_total_gib = cuda_memory
+        resource_candidates.extend([gpu_free_gib, gpu_total_gib])
+    else:
+        gpu_free_gib = gpu_total_gib = None
+    if ram_free_gib is not None:
+        resource_candidates.append(ram_free_gib)
+    if ram_total_gib is not None:
+        resource_candidates.append(ram_total_gib)
+
+    resource_gib = min(resource_candidates) if resource_candidates else 0.0
+    args.steps_per_epoch = _steps_for_resource_gib(resource_gib)
+    mode = "full-pass" if args.steps_per_epoch <= 0 else f"{args.steps_per_epoch} steps/epoch"
+    if gpu_free_gib is not None:
+        print(f"auto steps_per_epoch: gpu_free={gpu_free_gib:.1f}GiB ", end="", flush=True)
+    else:
+        print("auto steps_per_epoch: gpu=unavailable ", end="", flush=True)
+    if gpu_total_gib is not None:
+        print(f"gpu_total={gpu_total_gib:.1f}GiB ", end="", flush=True)
+    if ram_free_gib is not None:
+        print(f"ram_free={ram_free_gib:.1f}GiB ", end="", flush=True)
+    if ram_total_gib is not None:
+        print(f"ram_total={ram_total_gib:.1f}GiB ", end="", flush=True)
+    print(f"-> {mode}", flush=True)
+
+
+def _select_backward_mode(args, view: float, latent_scale: float) -> str:
+    global _VRAM_FALLBACK_REPORTED
+
+    requested = str(args.backward_mode)
+    if requested != "auto":
+        return requested
+
+    memory = _cuda_memory_gib(args.device)
+    if memory is None:
+        if not _VRAM_FALLBACK_REPORTED:
+            print(
+                "auto backward-mode: CUDA memory unavailable; using "
+                f"{_STANDARD_OOM_FALLBACK}",
+                flush=True,
+            )
+            _VRAM_FALLBACK_REPORTED = True
+        return _STANDARD_OOM_FALLBACK
+
+    free_gib, total_gib = memory
+    if total_gib < AUTO_FULL_PASS_MIN_TOTAL_VRAM_GIB or free_gib < AUTO_FULL_PASS_MIN_FREE_VRAM_GIB:
+        if not _VRAM_FALLBACK_REPORTED:
+            print(
+                "auto backward-mode: CUDA memory below standard threshold "
+                f"(free={free_gib:.1f}GiB total={total_gib:.1f}GiB; "
+                f"need free>={AUTO_FULL_PASS_MIN_FREE_VRAM_GIB:g}GiB "
+                f"and total>={AUTO_FULL_PASS_MIN_TOTAL_VRAM_GIB:g}GiB); "
+                f"using {_STANDARD_OOM_FALLBACK}",
+                flush=True,
+            )
+            _VRAM_FALLBACK_REPORTED = True
+        return _STANDARD_OOM_FALLBACK
+
+    num_latents = max(1, int(round(int(args.base_num_latents) * float(latent_scale))))
+    view = float(view)
+    for failed_num_latents, failed_view in _STANDARD_OOM_RULES:
+        if num_latents >= failed_num_latents and view >= failed_view:
+            return _STANDARD_OOM_FALLBACK
+    return "standard"
+
+
+def _manifest_error_is_oom(path: str | None) -> bool:
+    if not path:
+        return False
+    payload = sweep.manifest_payload(Path(path))
+    if not payload:
+        return False
+    error = str(payload.get("error", "")).lower()
+    return "outofmemory" in error or "out of memory" in error or "cuda oom" in error
+
+
+def _command_had_cuda_oom(cmd: list[str]) -> bool:
+    manifest_options = (
+        "--manifest-json",
+        "--grl-manifest-json",
+        "--nogrl-manifest-json",
+    )
+    return any(_manifest_error_is_oom(_extract_option(cmd, option)) for option in manifest_options)
+
+
+def _remember_standard_oom(cmd: list[str]) -> None:
+    try:
+        num_latents = int(_extract_option(cmd, "--num-latents") or 0)
+        view = float(_extract_option(cmd, "--sample-fraction") or 0.0)
+    except ValueError:
+        return
+    if num_latents <= 0 or view <= 0:
+        return
+    rule = (num_latents, view)
+    if rule not in _STANDARD_OOM_RULES:
+        _STANDARD_OOM_RULES.append(rule)
+        print(
+            "auto backward-mode: standard OOM observed; future combos with "
+            f"num_latents>={num_latents} and view>={view:g} will use {_STANDARD_OOM_FALLBACK}",
+            flush=True,
+        )
+
+
+def run_command_with_standard_oom_retry(cmd: list[str], cwd: Path) -> None:
+    try:
+        _BASE_RUN_COMMAND(cmd, cwd)
+        return
+    except sweep.subprocess.CalledProcessError:
+        if (
+            not _STANDARD_OOM_RETRY
+            or _extract_option(cmd, "--backward-mode") != "standard"
+            or _STANDARD_OOM_FALLBACK == "standard"
+            or not _command_had_cuda_oom(cmd)
+        ):
+            raise
+
+    _remember_standard_oom(cmd)
+    retry_cmd = list(cmd)
+    _set_option(retry_cmd, "--backward-mode", _STANDARD_OOM_FALLBACK)
+    print(
+        f"auto backward-mode: retrying CUDA OOM combo with --backward-mode {_STANDARD_OOM_FALLBACK}",
+        flush=True,
+    )
+    _BASE_RUN_COMMAND(retry_cmd, cwd)
+
+
+def _apply_cloud_train_options(cmd: list[str], args, backward_mode: str) -> list[str]:
     tag_split_json = args.tag_text_split_json or (args.out_dir / "tag_text_eval_split.json")
     text_variant_cache = args.text_variant_cache or (args.out_dir / "text_variant_embedding_cache.npz")
     test_case_cache = args.test_case_cache or (args.out_dir / "test_case_embeddings.npz")
     _set_option(cmd, "--cache-mode", args.cache_mode)
-    _set_option(cmd, "--backward-mode", args.backward_mode)
+    _set_option(cmd, "--backward-mode", backward_mode)
     _set_option(cmd, "--prefetch-batches", args.prefetch_batches)
     if args.max_batch_sentences > 0:
         _set_option(cmd, "--max-batch-sentences", args.max_batch_sentences)
@@ -94,12 +311,14 @@ def _apply_cloud_train_options(cmd: list[str], args) -> list[str]:
 def build_train_command(args, output_dim: int, arm: str, train_games: int, view: float, combo_dir: Path, latent_scale: float = 1.0) -> list[str]:
     cmd = _BASE_BUILD_TRAIN_COMMAND(args, output_dim, arm, train_games, view, combo_dir, latent_scale)
     _set_option(cmd, "--probe-history-tsv", combo_dir / "dual_probe_history.tsv")
-    return _apply_cloud_train_options(cmd, args)
+    backward_mode = _select_backward_mode(args, view, latent_scale)
+    return _apply_cloud_train_options(cmd, args, backward_mode)
 
 
 def build_paired_train_command(args, output_dim: int, train_games: int, view: float, latent_scale: float = 1.0) -> list[str]:
     cmd = _BASE_BUILD_PAIRED_TRAIN_COMMAND(args, output_dim, train_games, view, latent_scale)
-    return _apply_cloud_train_options(cmd, args)
+    backward_mode = _select_backward_mode(args, view, latent_scale)
+    return _apply_cloud_train_options(cmd, args, backward_mode)
 
 
 def should_try_paired_training(output_dim: int, train_games: int, view: float) -> bool:
@@ -116,6 +335,7 @@ def install_cloud_overrides(args) -> None:
     sweep.build_train_command = build_train_command
     sweep.build_paired_train_command = build_paired_train_command
     sweep.should_try_paired_training = should_try_paired_training
+    sweep.run_command = run_command_with_standard_oom_retry
 
 
 def stepped_train_game_counts(pool: int, start: int, step: int, include_full: bool) -> list[int]:
@@ -186,12 +406,20 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--latent-dim", type=int, default=256)
     parser.add_argument("--arms", nargs="+", default=["grl", "nogrl"], choices=["grl", "nogrl"])
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--steps-per-epoch", type=int, default=4)
+    parser.add_argument(
+        "--steps-per-epoch",
+        type=int,
+        default=None,
+        help=(
+            "Batches per epoch. Omit to auto-tier by RAM/VRAM: <40GiB keeps 4, "
+            "40-70GiB uses 8, >=70GiB uses full-pass. Explicit 0 forces full-pass."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--cache-dtype", choices=["float16", "float32"], default="float16")
-    parser.add_argument("--cache-mode", choices=["queue", "full"], default="queue")
+    parser.add_argument("--cache-mode", choices=["queue", "full"], default="full")
     parser.add_argument("--prefetch-batches", type=int, default=2)
-    parser.add_argument("--pin-cache", action="store_true")
+    parser.add_argument("--pin-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--max-batch-sentences",
         type=int,
@@ -203,9 +431,12 @@ def parse_args(argv: list[str] | None = None):
     )
     parser.add_argument(
         "--backward-mode",
-        choices=["split_recompute", "recompute", "standard"],
-        default="split_recompute",
-        help="Cloud training path. standard is fastest only when the full graph fits.",
+        choices=["auto", "split_recompute", "recompute", "standard"],
+        default="auto",
+        help=(
+            "Cloud training path. auto tries standard for A100 throughput and "
+            "falls back to split_recompute after CUDA OOM."
+        ),
     )
     parser.add_argument(
         "--paired-mode",
@@ -273,6 +504,14 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--eval-sample-fraction", type=float, default=0.6)
     parser.add_argument("--probe-folds", type=int, default=5)
     parser.add_argument("--max-game-sentences", type=int, default=4000)
+    parser.add_argument(
+        "--raw-cache-workers",
+        type=int,
+        default=0,
+        help="Workers for raw mean-pool cache. 0 uses CPU cores minus 1; 1 disables multiprocessing.",
+    )
+    parser.add_argument("--descriptions-dir", type=Path, default=DEFAULT_DESCRIPTIONS_DIR)
+    parser.add_argument("--max-description-sentences", type=int, default=256)
     parser.add_argument("--max-text-sentences", type=int, default=4096)
     parser.add_argument("--local-model", default=sweep.DEFAULT_LOCAL_MODEL)
     parser.add_argument("--embed-batch-size", type=int, default=32)
@@ -283,11 +522,28 @@ def parse_args(argv: list[str] | None = None):
         action="store_true",
         help="Rebuild sweep-level raw/text evaluation caches. Per-combo eval caches still use --rebuild-eval.",
     )
+    parser.add_argument(
+        "--prepare-shared-eval-only",
+        action="store_true",
+        help="Build shared raw/text evaluation caches, then exit before training or per-combo evaluation.",
+    )
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
-    parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument(
+        "--eval-mode",
+        choices=["per_combo", "final_best", "none"],
+        default="final_best",
+        help=(
+            "Cloud default is final_best: train the sweep first, then run the "
+            "expensive raw-Qwen/VICReg comparison once on the best full-train checkpoint."
+        ),
+    )
+    parser.add_argument("--skip-eval", action="store_true", help="Deprecated alias for --eval-mode none.")
     parser.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.skip_eval:
+        args.eval_mode = "none"
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -297,6 +553,7 @@ def main(argv: list[str] | None = None) -> None:
 
 def run_main(args) -> None:
     expand_train_game_counts(args)
+    resolve_auto_steps_per_epoch(args)
     if args.tag_text_split_json is None:
         args.tag_text_split_json = args.out_dir / "tag_text_eval_split.json"
     if args.text_variant_cache is None:

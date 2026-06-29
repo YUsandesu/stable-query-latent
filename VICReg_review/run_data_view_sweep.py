@@ -19,9 +19,11 @@ are test-only here.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import csv
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -32,6 +34,9 @@ import h5py
 import numpy as np
 import torch
 
+_RAW_CACHE_H5 = None
+_RAW_CACHE_VECTORS = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 if str(ROOT) not in sys.path:
@@ -39,7 +44,6 @@ if str(ROOT) not in sys.path:
 
 from VICReg_review.identity_diagnostic import (  # noqa: E402
     DEFAULT_LOCAL_MODEL,
-    encode_text_centroid,
     l2_normalize,
     participation_ratio,
     retrieval_rank,
@@ -63,6 +67,71 @@ from VICReg_review.train_vicreg_review_h5 import (  # noqa: E402
 DEFAULT_H5 = ROOT / "game_review_data" / "embedding_h5.h5"
 DEFAULT_OUT_DIR = SCRIPT_DIR / "heads" / "data_view_sweep"
 DEFAULT_PYTHON = Path(sys.executable)
+DEFAULT_DESCRIPTIONS_DIR = SCRIPT_DIR / "tags" / "game_descriptions"
+DEFAULT_SST_CHECKPOINT = ROOT / "sst" / "heads" / "mlp4_1024_128_32_8_1_best.pt"
+DEFAULT_SENTIMENT_CACHE = SCRIPT_DIR / "tags" / "game_sentiment.npz"
+
+
+def _init_raw_cache_worker(h5_path: str) -> None:
+    global _RAW_CACHE_H5, _RAW_CACHE_VECTORS
+    _RAW_CACHE_H5 = h5py.File(h5_path, "r")
+    _RAW_CACHE_VECTORS = _RAW_CACHE_H5["vectors"]
+
+
+def _raw_cache_worker(task):
+    game_index, sentence_start, sentence_end, selected_indices, h5_path = task
+    vectors = _RAW_CACHE_VECTORS
+    h5 = None
+    if vectors is None:
+        h5 = h5py.File(h5_path, "r")
+        vectors = h5["vectors"]
+    try:
+        if selected_indices is None:
+            block = vectors[int(sentence_start) : int(sentence_end)].astype(np.float32)
+        else:
+            block = vectors[np.asarray(selected_indices, dtype=np.int64)].astype(np.float32)
+        return int(game_index), block.mean(axis=0).astype(np.float32)
+    finally:
+        if h5 is not None:
+            h5.close()
+
+
+def resolve_raw_cache_workers(requested: int | None) -> int:
+    if requested is None or int(requested) <= 0:
+        return max(1, (os.cpu_count() or 1) - 1)
+    return max(1, int(requested))
+
+
+def sample_vector_views(vectors: np.ndarray, feature_views: int, sample_fraction: float, seed: int) -> list[np.ndarray]:
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if vectors.ndim != 2 or vectors.shape[0] == 0:
+        raise ValueError(f"Expected non-empty 2D vectors, got shape={vectors.shape}")
+    rng = np.random.default_rng(int(seed))
+    views = []
+    for _ in range(max(1, int(feature_views))):
+        if vectors.shape[0] > 2:
+            size = max(1, int(np.ceil(vectors.shape[0] * float(sample_fraction))))
+            indices = np.sort(rng.choice(vectors.shape[0], size=size, replace=False))
+            views.append(vectors[indices].astype(np.float32, copy=False))
+        else:
+            views.append(vectors.astype(np.float32, copy=False))
+    return views
+
+
+@torch.no_grad()
+def encode_sampled_views_with_encoder(encoder, views: list[np.ndarray], amp_enabled: bool, device) -> np.ndarray:
+    centroids = []
+    for view in views:
+        tensor = torch.from_numpy(np.asarray(view, dtype=np.float32)).to(device)
+        with torch.amp.autocast("cuda", enabled=amp_enabled and device.type == "cuda"):
+            code = encoder(tensor.unsqueeze(0).float(), key_padding_mask=None)
+        centroids.append(code.squeeze(0).float().mean(dim=0))
+    return torch.stack(centroids, dim=0).mean(dim=0).cpu().numpy().astype(np.float32)
+
+
+def raw_query_from_views(views: list[np.ndarray]) -> np.ndarray:
+    means = [np.asarray(view, dtype=np.float32).mean(axis=0) for view in views]
+    return np.stack(means, axis=0).mean(axis=0).astype(np.float32)
 
 
 def atomic_text_write(text: str, path: Path) -> None:
@@ -426,18 +495,294 @@ def h5_game_metadata(h5_path: Path) -> tuple[list[str], list[str], list[str]]:
     return names, appids, titles
 
 
-def cache_raw_game_vectors(args, appids: list[str], names: list[str], titles: list[str]) -> dict:
-    cache_path = args.out_dir / "raw_identity_cache_ms4000.npz"
-    if cache_path.exists() and not args.rebuild_shared_eval:
-        data = np.load(cache_path, allow_pickle=True)
-        return {key: data[key] for key in data.files}
+def raw_cache_path(args) -> Path:
+    return args.out_dir / f"raw_identity_cache_ms{int(args.max_game_sentences)}.npz"
 
+
+def load_valid_raw_cache(args, appids: list[str], names: list[str], titles: list[str]) -> tuple[dict | None, str]:
+    cache_path = raw_cache_path(args)
+    if not cache_path.exists():
+        return None, "missing"
+    try:
+        with np.load(cache_path, allow_pickle=True) as data:
+            required = {
+                "X",
+                "appids",
+                "names",
+                "titles",
+                "max_game_sentences",
+                "h5_vector_rows",
+                "h5_vector_dim",
+            }
+            missing = sorted(required - set(data.files))
+            if missing:
+                return None, f"missing keys: {missing}"
+            X = data["X"]
+            cache_appids = [str(x) for x in data["appids"]]
+            cache_names = [str(x) for x in data["names"]]
+            cache_titles = [str(x) for x in data["titles"]]
+            payload = {key: data[key] for key in data.files}
+    except BaseException as exc:  # noqa: BLE001 - bad cache should trigger rebuild
+        return None, f"load failed: {type(exc).__name__}: {exc}"
+
+    expected_rows = len(appids)
+    if X.ndim != 2:
+        return None, f"X must be 2D, got shape={tuple(X.shape)}"
+    if int(X.shape[0]) != expected_rows:
+        return None, f"row count mismatch: X rows={int(X.shape[0])}, expected={expected_rows}"
+    with h5py.File(args.h5, "r") as h5:
+        expected_dim = int(h5["vectors"].shape[1])
+    if int(X.shape[1]) != expected_dim:
+        return None, f"dim mismatch: X dim={int(X.shape[1])}, expected={expected_dim}"
+    if not np.isfinite(X).all():
+        return None, "X contains NaN or Inf"
+    if len(cache_appids) != expected_rows or len(cache_names) != expected_rows or len(cache_titles) != expected_rows:
+        return None, (
+            "metadata length mismatch: "
+            f"appids={len(cache_appids)} names={len(cache_names)} titles={len(cache_titles)} expected={expected_rows}"
+        )
+    if cache_appids != [str(x) for x in appids]:
+        return None, "appid order/content mismatch"
+    if cache_names != [str(x) for x in names]:
+        return None, "game name order/content mismatch"
+    if cache_titles != [str(x) for x in titles]:
+        return None, "title order/content mismatch"
+    try:
+        observed_max = int(np.asarray(payload["max_game_sentences"]).reshape(-1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None, "invalid max_game_sentences metadata"
+    if observed_max != int(args.max_game_sentences):
+        return None, f"max_game_sentences mismatch: cache={observed_max}, expected={int(args.max_game_sentences)}"
+    with h5py.File(args.h5, "r") as h5:
+        expected_vector_rows = int(h5["vectors"].shape[0])
+    try:
+        observed_vector_rows = int(np.asarray(payload["h5_vector_rows"]).reshape(-1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None, "invalid h5_vector_rows metadata"
+    if observed_vector_rows != expected_vector_rows:
+        return None, f"H5 vector row mismatch: cache={observed_vector_rows}, expected={expected_vector_rows}"
+    try:
+        observed_vector_dim = int(np.asarray(payload["h5_vector_dim"]).reshape(-1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None, "invalid h5_vector_dim metadata"
+    if observed_vector_dim != expected_dim:
+        return None, f"H5 vector dim mismatch: cache={observed_vector_dim}, expected={expected_dim}"
+    return payload, "ok"
+
+
+def ensure_raw_game_vector_cache(args, appids: list[str], names: list[str], titles: list[str]) -> Path:
+    cache_path = raw_cache_path(args)
+    if not args.rebuild_shared_eval:
+        payload, reason = load_valid_raw_cache(args, appids, names, titles)
+        if payload is not None:
+            print(f"raw cache ready: {cache_path}", flush=True)
+            return cache_path
+        print(f"raw cache rebuild needed: {reason} -> {cache_path}", flush=True)
+    else:
+        print(f"raw cache rebuild requested -> {cache_path}", flush=True)
+    cache_raw_game_vectors(args, appids, names, titles)
+    payload, reason = load_valid_raw_cache(args, appids, names, titles)
+    if payload is None:
+        raise RuntimeError(f"Raw cache failed validation after rebuild: {reason}")
+    print(f"raw cache ready: {cache_path}", flush=True)
+    return cache_path
+
+
+def load_or_build_raw_game_vectors(args, appids: list[str], names: list[str], titles: list[str]) -> dict:
+    if not args.rebuild_shared_eval:
+        payload, reason = load_valid_raw_cache(args, appids, names, titles)
+        if payload is not None:
+            return payload
+        print(f"raw cache rebuild needed: {reason} -> {raw_cache_path(args)}", flush=True)
+    else:
+        print(f"raw cache rebuild requested -> {raw_cache_path(args)}", flush=True)
+    payload = cache_raw_game_vectors(args, appids, names, titles)
+    verified, reason = load_valid_raw_cache(args, appids, names, titles)
+    if verified is None:
+        raise RuntimeError(f"Raw cache failed validation after rebuild: {reason}")
+    return payload
+
+
+def description_cache_path(args) -> Path:
+    return args.out_dir / f"description_raw_qwen_ms{int(args.max_description_sentences)}.npz"
+
+
+def description_source_signature(paths: list[Path]) -> tuple[list[str], list[int], list[int]]:
+    return (
+        [str(path.resolve()) for path in paths],
+        [int(path.stat().st_mtime_ns) for path in paths],
+        [int(path.stat().st_size) for path in paths],
+    )
+
+
+def load_valid_description_cache(args) -> tuple[dict | None, str]:
+    cache_path = description_cache_path(args)
+    if not cache_path.exists():
+        return None, "missing"
+    try:
+        with np.load(cache_path, allow_pickle=True) as data:
+            required = {
+                "X",
+                "appids",
+                "names",
+                "titles",
+                "sentence_counts",
+                "paths",
+                "source_mtime_ns",
+                "source_sizes",
+                "embedding_model",
+                "max_description_sentences",
+            }
+            missing = sorted(required - set(data.files))
+            if missing:
+                return None, f"missing keys: {missing}"
+            payload = {key: data[key] for key in data.files}
+    except BaseException as exc:  # noqa: BLE001
+        return None, f"load failed: {type(exc).__name__}: {exc}"
+    X = payload["X"]
+    if X.ndim != 2:
+        return None, f"X must be 2D, got shape={tuple(X.shape)}"
+    if not np.isfinite(X).all():
+        return None, "X contains NaN or Inf"
+    appids = [str(x) for x in payload["appids"]]
+    names = [str(x) for x in payload["names"]]
+    titles = [str(x) for x in payload["titles"]]
+    paths = [Path(str(x)) for x in payload["paths"]]
+    if not (len(appids) == len(names) == len(titles) == len(paths) == int(X.shape[0])):
+        return None, "metadata length mismatch"
+    if any(not path.exists() for path in paths):
+        return None, "one or more description source files are missing"
+    expected_paths, expected_mtime_ns, expected_sizes = description_source_signature(paths)
+    if [str(x) for x in payload["paths"]] != expected_paths:
+        return None, "description path mismatch"
+    if [int(x) for x in payload["source_mtime_ns"]] != expected_mtime_ns:
+        return None, "description source mtime mismatch"
+    if [int(x) for x in payload["source_sizes"]] != expected_sizes:
+        return None, "description source size mismatch"
+    model = str(np.asarray(payload["embedding_model"]).reshape(-1)[0])
+    if model != str(args.local_model):
+        return None, f"embedding model mismatch: cache={model}, expected={args.local_model}"
+    try:
+        max_sentences = int(np.asarray(payload["max_description_sentences"]).reshape(-1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None, "invalid max_description_sentences metadata"
+    if max_sentences != int(args.max_description_sentences):
+        return None, (
+            f"max_description_sentences mismatch: cache={max_sentences}, "
+            f"expected={int(args.max_description_sentences)}"
+        )
+    return payload, "ok"
+
+
+def load_or_build_description_raw_cache(args, h5_appids: list[str], h5_names: list[str], h5_titles: list[str]) -> dict:
+    if not args.rebuild_shared_eval:
+        payload, reason = load_valid_description_cache(args)
+        if payload is not None:
+            return payload
+        if description_cache_path(args).exists():
+            print(f"description raw cache invalid: {reason}; rebuilding", flush=True)
+        else:
+            print(f"description raw cache rebuild needed: {reason}", flush=True)
+    else:
+        print(f"description raw cache rebuild requested -> {description_cache_path(args)}", flush=True)
+
+    records = []
+    descriptions_dir = Path(args.descriptions_dir)
+    for appid, name, title in zip(h5_appids, h5_names, h5_titles):
+        path = descriptions_dir / f"{appid}.txt"
+        if path.exists():
+            records.append((str(appid), str(name), str(title), path))
+    if not records:
+        print(f"description raw cache skipped: no description txt files found in {descriptions_dir}", flush=True)
+        return {
+            "X": np.empty((0, 0), dtype=np.float32),
+            "appids": np.asarray([], dtype=object),
+            "names": np.asarray([], dtype=object),
+            "titles": np.asarray([], dtype=object),
+            "status": np.asarray(["disabled"], dtype=object),
+            "reason": np.asarray([f"no description txt files found in {descriptions_dir}"], dtype=object),
+        }
+
+    embedder = disturbtion_embed.LocalEmbedder(
+        args.local_model,
+        device=args.device,
+        batch_size=int(args.embed_batch_size),
+    )
+    rows = []
+    sentence_counts = []
+    kept_records = []
+    try:
+        for index, (appid, _name, _title, path) in enumerate(records, start=1):
+            text = path.read_text(encoding="utf-8")
+            sentences = disturbtion_embed.split_text(text, int(args.max_description_sentences))
+            if not sentences:
+                continue
+            vectors = np.asarray(embedder.embed(sentences), dtype=np.float32)
+            rows.append(vectors.mean(axis=0).astype(np.float32))
+            sentence_counts.append(len(sentences))
+            kept_records.append((appid, _name, _title, path))
+            if index % 25 == 0 or index == len(records):
+                print(
+                    f"description raw cache {index}/{len(records)} appid={appid} sentences={len(sentences)}",
+                    flush=True,
+                )
+    finally:
+        del embedder
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if not rows:
+        raise ValueError(f"No non-empty description txt files found in {descriptions_dir}")
+    paths = [record[3] for record in kept_records]
+    source_paths, source_mtime_ns, source_sizes = description_source_signature(paths)
+    payload = {
+        "X": np.stack(rows, axis=0).astype(np.float32),
+        "appids": np.asarray([record[0] for record in kept_records], dtype=object),
+        "names": np.asarray([record[1] for record in kept_records], dtype=object),
+        "titles": np.asarray([record[2] for record in kept_records], dtype=object),
+        "sentence_counts": np.asarray(sentence_counts, dtype=np.int32),
+        "paths": np.asarray(source_paths, dtype=object),
+        "source_mtime_ns": np.asarray(source_mtime_ns, dtype=np.int64),
+        "source_sizes": np.asarray(source_sizes, dtype=np.int64),
+        "embedding_model": np.asarray([str(args.local_model)], dtype=object),
+        "max_description_sentences": np.asarray([int(args.max_description_sentences)], dtype=np.int64),
+    }
+    cache_path = description_cache_path(args)
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tmp_path.open("wb") as handle:
+            np.savez_compressed(handle, **payload)
+        tmp_path.replace(cache_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    verified, reason = load_valid_description_cache(args)
+    if verified is None:
+        raise RuntimeError(f"Description raw cache failed validation after rebuild: {reason}")
+    print(f"description raw cache ready: {cache_path}", flush=True)
+    return payload
+
+
+def cache_raw_game_vectors(args, appids: list[str], names: list[str], titles: list[str]) -> dict:
+    global _RAW_CACHE_H5, _RAW_CACHE_VECTORS
+
+    cache_path = raw_cache_path(args)
+    if not args.rebuild_shared_eval:
+        payload, reason = load_valid_raw_cache(args, appids, names, titles)
+        if payload is not None:
+            return payload
+        if cache_path.exists():
+            print(f"raw cache invalid: {reason}; rebuilding {cache_path}", flush=True)
     rng = np.random.default_rng(args.seed)
-    X = []
+    tasks = []
+    input_dim = None
+    h5_vector_rows = None
     with h5py.File(args.h5, "r") as h5:
         game_offsets = h5["game_review_offsets"][:]
         review_offsets = h5["review_offsets"]
-        vectors = h5["vectors"]
+        input_dim = int(h5["vectors"].shape[1])
+        h5_vector_rows = int(h5["vectors"].shape[0])
         for gi in range(len(appids)):
             review_start = int(game_offsets[gi])
             review_end = int(game_offsets[gi + 1])
@@ -445,21 +790,58 @@ def cache_raw_game_vectors(args, appids: list[str], names: list[str], titles: li
             sentence_end = int(review_offsets[review_end])
             n_sent = sentence_end - sentence_start
             if n_sent <= args.max_game_sentences:
-                block = vectors[sentence_start:sentence_end].astype(np.float32)
+                selected = None
             else:
-                selected = np.sort(rng.choice(n_sent, size=args.max_game_sentences, replace=False)) + sentence_start
-                block = vectors[selected].astype(np.float32)
-            X.append(block.mean(axis=0).astype(np.float32))
-            if (gi + 1) % 50 == 0 or gi + 1 == len(appids):
-                print(f"raw cache {gi + 1}/{len(appids)}", flush=True)
+                selected = (
+                    np.sort(rng.choice(n_sent, size=args.max_game_sentences, replace=False)) + sentence_start
+                ).astype(np.int64)
+            tasks.append((gi, sentence_start, sentence_end, selected, str(Path(args.h5))))
+
+    workers = min(resolve_raw_cache_workers(getattr(args, "raw_cache_workers", 0)), len(tasks))
+    X = np.empty((len(tasks), int(input_dim)), dtype=np.float32)
+    if workers <= 1:
+        _init_raw_cache_worker(str(Path(args.h5)))
+        try:
+            for done, task in enumerate(tasks, start=1):
+                gi, vector = _raw_cache_worker(task)
+                X[gi] = vector
+                if done % 50 == 0 or done == len(tasks):
+                    print(f"raw cache {done}/{len(tasks)} workers=1", flush=True)
+        finally:
+            if _RAW_CACHE_H5 is not None:
+                _RAW_CACHE_H5.close()
+            _RAW_CACHE_H5 = None
+            _RAW_CACHE_VECTORS = None
+    else:
+        print(f"raw cache: building {len(tasks)} games with {workers} workers", flush=True)
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_raw_cache_worker,
+            initargs=(str(Path(args.h5)),),
+        ) as executor:
+            futures = [executor.submit(_raw_cache_worker, task) for task in tasks]
+            for done, future in enumerate(as_completed(futures), start=1):
+                gi, vector = future.result()
+                X[gi] = vector
+                if done % 50 == 0 or done == len(tasks):
+                    print(f"raw cache {done}/{len(tasks)} workers={workers}", flush=True)
     payload = {
-        "X": np.stack(X, axis=0).astype(np.float32),
+        "X": X.astype(np.float32),
         "appids": np.asarray(appids, dtype=object),
         "names": np.asarray(names, dtype=object),
         "titles": np.asarray(titles, dtype=object),
+        "max_game_sentences": np.asarray([int(args.max_game_sentences)], dtype=np.int64),
+        "h5_vector_rows": np.asarray([int(h5_vector_rows)], dtype=np.int64),
+        "h5_vector_dim": np.asarray([int(input_dim)], dtype=np.int64),
     }
-    with cache_path.open("wb") as handle:
-        np.savez_compressed(handle, **payload)
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    try:
+        with tmp_path.open("wb") as handle:
+            np.savez_compressed(handle, **payload)
+        tmp_path.replace(cache_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return payload
 
 
@@ -477,7 +859,7 @@ def embed_test_cases(args) -> dict:
 
 
 def ensure_disturbtion_eval_caches(args) -> None:
-    if args.skip_eval:
+    if getattr(args, "eval_mode", "per_combo") == "none":
         return
     disturbtion_embed.ensure_test_case_cache(
         args.out_dir / "test_case_embeddings.npz",
@@ -652,8 +1034,46 @@ def tag_probe_metrics(args, feats: np.ndarray, feature_names: list[str]) -> dict
     return tag_summarize(per_tag_tp, per_tag_fp, per_tag_fn, scored, fold_f1s, y, tags, probe_args)
 
 
+def ensure_game_sentiment_cache(args) -> Path:
+    cache_path = DEFAULT_SENTIMENT_CACHE
+    if cache_path.exists():
+        return cache_path
+    if not DEFAULT_SST_CHECKPOINT.exists():
+        raise FileNotFoundError(
+            f"Missing sentiment cache {cache_path} and SST checkpoint {DEFAULT_SST_CHECKPOINT}. "
+            "Build SST heads first or provide the cache."
+        )
+
+    from VICReg_review.probe_selectivity import build_sentiment_targets
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    max_sentences = int(getattr(args, "max_text_sentences", 4096))
+    print(
+        f"sentiment cache missing; building {cache_path} from {args.h5} "
+        f"max_sentences={max_sentences} device={device}",
+        flush=True,
+    )
+    names, sent = build_sentiment_targets(
+        args.h5,
+        DEFAULT_SST_CHECKPOINT,
+        max_sentences,
+        args.seed,
+        device,
+    )
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    try:
+        with tmp_path.open("wb") as handle:
+            np.savez(handle, names=np.asarray(names), sent=np.asarray(sent, dtype=np.float32))
+        tmp_path.replace(cache_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return cache_path
+
+
 def sentiment_r2(args, X: np.ndarray, names: list[str]) -> dict:
-    cache = np.load(SCRIPT_DIR / "tags" / "game_sentiment.npz", allow_pickle=True)
+    cache = np.load(ensure_game_sentiment_cache(args), allow_pickle=True)
     targets = {str(n): float(s) for n, s in zip(cache["names"], cache["sent"])}
     rows = [i for i, n in enumerate(names) if n in targets]
     y = np.asarray([targets[names[i]] for i in rows], dtype=np.float64)
@@ -716,7 +1136,15 @@ def recommendation_probe(args, X: np.ndarray, names: list[str]) -> dict:
     return summarize_cv(folds)
 
 
-def identity_metrics(args, checkpoint: Path, feats: np.ndarray, names: list[str], raw_cache: dict, text_cache: dict) -> dict:
+def identity_metrics(
+    args,
+    checkpoint: Path,
+    feats: np.ndarray,
+    names: list[str],
+    raw_cache: dict,
+    description_cache: dict,
+    text_cache: dict,
+) -> dict:
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     with h5py.File(args.h5, "r") as h5:
         input_dim = int(h5.attrs["input_dim"])
@@ -731,21 +1159,35 @@ def identity_metrics(args, checkpoint: Path, feats: np.ndarray, names: list[str]
     titles = [str(x) for x in raw_cache["titles"]]
     X_raw = raw_cache["X"].astype(np.float32)
     X_vic = feats.mean(axis=1).astype(np.float32)
+    desc_appids = [str(x) for x in description_cache.get("appids", [])]
+    X_desc_raw = description_cache.get("X", np.empty((0, 0), dtype=np.float32)).astype(np.float32)
     rows = []
     text_features = {}
     offsets = text_cache["offsets"].astype(np.int64)
     for i, (game, appid, sentiment) in enumerate(zip(text_cache["games"], text_cache["appids"], text_cache["sentiments"])):
         vectors = text_cache["vectors"][int(offsets[i]): int(offsets[i + 1])].astype(np.float32)
-        raw_query = vectors.mean(axis=0).astype(np.float32)
-        vic_query = encode_text_centroid(encoder, vectors, encode_args, device)
+        views = sample_vector_views(
+            vectors,
+            encode_args.feature_views,
+            encode_args.sample_fraction,
+            encode_args.seed + i * 1_000_003,
+        )
+        raw_query = raw_query_from_views(views)
+        vic_query = encode_sampled_views_with_encoder(encoder, views, encode_args.amp, device)
         raw_rank, raw_sim, _, _ = retrieval_rank(X_raw, raw_query, appids, str(appid), 3)
+        if X_desc_raw.size and str(appid) in desc_appids:
+            desc_raw_rank, desc_raw_sim, _, _ = retrieval_rank(X_desc_raw, raw_query, desc_appids, str(appid), 3)
+        else:
+            desc_raw_rank, desc_raw_sim = None, float("nan")
         vic_rank, vic_sim, _, _ = retrieval_rank(X_vic, vic_query, appids, str(appid), 3)
         rows.append({
             "game": str(game),
             "appid": str(appid),
             "sentiment": str(sentiment),
-            "raw_rank": int(raw_rank),
-            "raw_similarity": float(raw_sim),
+            "raw_h5_rank": int(raw_rank),
+            "raw_h5_similarity": float(raw_sim),
+            "raw_description_rank": int(desc_raw_rank) if desc_raw_rank is not None else None,
+            "raw_description_similarity": float(desc_raw_sim),
             "vicreg_rank": int(vic_rank),
             "vicreg_similarity": float(vic_sim),
         })
@@ -768,7 +1210,37 @@ def identity_metrics(args, checkpoint: Path, feats: np.ndarray, names: list[str]
                 vic_cos = float((l2_normalize(vic_a[None, :]) @ l2_normalize(vic_b[None, :]).T)[0, 0])
                 pair_rows.append({"game": game, "pair": f"{a} vs {b}", "raw_cosine": raw_cos, "vicreg_cosine": vic_cos})
     ranks = [row["vicreg_rank"] for row in rows]
+    raw_h5_ranks = [row["raw_h5_rank"] for row in rows]
+    raw_desc_ranks = [row["raw_description_rank"] for row in rows if row["raw_description_rank"] is not None]
     return {
+        "raw_h5_baseline": {
+            "input_source": "h5_all_text_mean",
+            "dim": int(X_raw.shape[1]),
+            "n_games": int(X_raw.shape[0]),
+            "mean_rank": float(np.mean(raw_h5_ranks)) if raw_h5_ranks else float("nan"),
+            "median_rank": float(np.median(raw_h5_ranks)) if raw_h5_ranks else float("nan"),
+            "hit_at_1": float(np.mean([rank <= 1 for rank in raw_h5_ranks])) if raw_h5_ranks else float("nan"),
+            "hit_at_5": float(np.mean([rank <= 5 for rank in raw_h5_ranks])) if raw_h5_ranks else float("nan"),
+            "hit_at_100": float(np.mean([rank <= 100 for rank in raw_h5_ranks])) if raw_h5_ranks else float("nan"),
+        },
+        "raw_description_baseline": {
+            "input_source": "game_descriptions_mean",
+            "status": "ok" if X_desc_raw.size else "disabled",
+            "reason": str(description_cache.get("reason", [""])[0]) if not X_desc_raw.size and "reason" in description_cache else None,
+            "dim": int(X_desc_raw.shape[1]) if X_desc_raw.ndim == 2 else 0,
+            "n_games": int(X_desc_raw.shape[0]) if X_desc_raw.ndim == 2 else 0,
+            "coverage": float(len(raw_desc_ranks) / len(rows)) if rows else 0.0,
+            "mean_rank": float(np.mean(raw_desc_ranks)) if raw_desc_ranks else float("nan"),
+            "median_rank": float(np.median(raw_desc_ranks)) if raw_desc_ranks else float("nan"),
+            "hit_at_1": float(np.mean([rank <= 1 for rank in raw_desc_ranks])) if raw_desc_ranks else float("nan"),
+            "hit_at_5": float(np.mean([rank <= 5 for rank in raw_desc_ranks])) if raw_desc_ranks else float("nan"),
+            "hit_at_100": float(np.mean([rank <= 100 for rank in raw_desc_ranks])) if raw_desc_ranks else float("nan"),
+        },
+        "vicreg_baseline": {
+            "input_source": "h5_all_text_vicreg",
+            "dim": int(X_vic.shape[1]),
+            "n_games": int(X_vic.shape[0]),
+        },
         "participation_ratio": participation_ratio(X_vic)["pr"],
         "zscore_participation_ratio": participation_ratio(X_vic, zscore=True)["pr"],
         "mean_rank": float(np.mean(ranks)),
@@ -807,6 +1279,7 @@ def evaluate_combo_from_features(
     feats: np.ndarray,
     feature_names: list[str],
     raw_cache: dict,
+    description_cache: dict,
     text_cache: dict,
 ) -> dict:
     report_path = combo_dir / "eval_report.json"
@@ -828,7 +1301,7 @@ def evaluate_combo_from_features(
         "tag_probe": tag_probe_metrics(args, feats, feature_names),
         "sentiment_probe": sentiment_r2(args, X_stats, feature_names),
         "recommendation_probe": recommendation_probe(args, X_stats, feature_names),
-        "identity": identity_metrics(args, checkpoint, feats, feature_names, raw_cache, text_cache),
+        "identity": identity_metrics(args, checkpoint, feats, feature_names, raw_cache, description_cache, text_cache),
         "text_variant_eval": text_variant_metrics(args, checkpoint, combo_dir, feats, feature_names),
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -846,10 +1319,11 @@ def evaluate_combo(args, checkpoint: Path, combo_dir: Path) -> dict:
             return payload
 
     names, appids, titles = h5_game_metadata(args.h5)
-    raw_cache = cache_raw_game_vectors(args, appids, names, titles)
+    raw_cache = load_or_build_raw_game_vectors(args, appids, names, titles)
+    description_cache = load_or_build_description_raw_cache(args, appids, names, titles)
     text_cache = embed_test_cases(args)
     feats, feature_names = build_vicreg_feature_cache(args, checkpoint, combo_dir)
-    return evaluate_combo_from_features(args, checkpoint, combo_dir, feats, feature_names, raw_cache, text_cache)
+    return evaluate_combo_from_features(args, checkpoint, combo_dir, feats, feature_names, raw_cache, description_cache, text_cache)
 
 
 def evaluate_targets(args, targets: list[tuple[Path, Path]]) -> None:
@@ -871,14 +1345,73 @@ def evaluate_targets(args, targets: list[tuple[Path, Path]]) -> None:
         return
 
     names, appids, titles = h5_game_metadata(args.h5)
-    raw_cache = cache_raw_game_vectors(args, appids, names, titles)
+    raw_cache = load_or_build_raw_game_vectors(args, appids, names, titles)
+    description_cache = load_or_build_description_raw_cache(args, appids, names, titles)
     text_cache = embed_test_cases(args)
     for checkpoint, combo_dir in pending:
         feats, feature_names = build_vicreg_feature_cache(args, checkpoint, combo_dir)
-        evaluate_combo_from_features(args, checkpoint, combo_dir, feats, feature_names, raw_cache, text_cache)
+        evaluate_combo_from_features(args, checkpoint, combo_dir, feats, feature_names, raw_cache, description_cache, text_cache)
         del feats, feature_names
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def full_train_count_value(args) -> int:
+    return 0 if any(int(count) <= 0 for count in args.train_game_counts) else max(int(count) for count in args.train_game_counts)
+
+
+def final_best_candidates(args) -> list[tuple[float, Path, Path, dict]]:
+    target_count = full_train_count_value(args)
+    candidates = []
+    for output_dim in args.output_dims:
+        for latent_scale in args.latent_scales:
+            for arm in args.arms:
+                arm = arm_label(arm)
+                for view in args.sample_fractions:
+                    paths = combo_paths(args, output_dim, arm, target_count, view, latent_scale)
+                    manifest = manifest_payload(paths["manifest"])
+                    checkpoint = paths["best_checkpoint"] if paths["best_checkpoint"].exists() else paths["checkpoint"]
+                    if not manifest or manifest.get("status") != "done" or not checkpoint.exists():
+                        continue
+                    if not manifest_matches_config(paths["manifest"], args, arm, output_dim, latent_scale):
+                        continue
+                    metrics = manifest.get("metrics") or {}
+                    try:
+                        loss = float(metrics.get("loss"))
+                    except (TypeError, ValueError):
+                        loss = float("inf")
+                    metadata = {
+                        "output_dim": int(output_dim),
+                        "latent_scale": float(latent_scale),
+                        "arm": arm,
+                        "train_games": int(target_count),
+                        "view_fraction": float(view),
+                        "manifest": str(paths["manifest"]),
+                        "checkpoint": str(checkpoint),
+                        "loss": loss,
+                    }
+                    candidates.append((loss, checkpoint, paths["dir"], metadata))
+    return sorted(candidates, key=lambda item: item[0])
+
+
+def evaluate_final_best(args) -> dict | None:
+    candidates = final_best_candidates(args)
+    if not candidates:
+        print("final_best eval skipped: no completed full-train checkpoint found.", flush=True)
+        return None
+    _loss, checkpoint, combo_dir, metadata = candidates[0]
+    final_dir = args.out_dir / "final_best_eval"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    report = evaluate_combo(args, checkpoint, final_dir)
+    payload = {
+        "selected": metadata,
+        "source_combo_dir": str(combo_dir),
+        "report": report,
+        "finished_at": timestamp(),
+    }
+    atomic_json_write(payload, final_dir / "final_best_eval.json")
+    print(f"final_best eval done -> {final_dir}", flush=True)
+    return payload
 
 
 def scalar_from_report(report: dict) -> dict:
@@ -1072,6 +1605,8 @@ def export_raw_detail_tables(args, rows: list[dict]) -> None:
         reco_rows.append({**base, **reco})
 
         identity = report.get("identity") or {}
+        raw_h5 = identity.get("raw_h5_baseline") or {}
+        raw_desc = identity.get("raw_description_baseline") or {}
         identity_summary_rows.append({
             **base,
             "participation_ratio": identity.get("participation_ratio"),
@@ -1082,6 +1617,12 @@ def export_raw_detail_tables(args, rows: list[dict]) -> None:
             "hit_at_5": identity.get("hit_at_5"),
             "hit_at_100": identity.get("hit_at_100"),
             "mean_vicreg_cosine": identity.get("mean_vicreg_cosine"),
+            "raw_h5_mean_rank": raw_h5.get("mean_rank"),
+            "raw_h5_hit_at_5": raw_h5.get("hit_at_5"),
+            "raw_description_status": raw_desc.get("status"),
+            "raw_description_coverage": raw_desc.get("coverage"),
+            "raw_description_mean_rank": raw_desc.get("mean_rank"),
+            "raw_description_hit_at_5": raw_desc.get("hit_at_5"),
         })
         for detail in identity.get("retrieval_rows", []):
             retrieval_rows.append({**base, **detail})
@@ -1229,6 +1770,7 @@ def render_report(rows: list[dict], args) -> str:
 
 def summarize(args) -> list[dict]:
     rows = []
+    eval_mode = getattr(args, "eval_mode", "per_combo")
     for output_dim in args.output_dims:
         for latent_scale in args.latent_scales:
             num_latents = effective_num_latents(args, latent_scale)
@@ -1267,6 +1809,12 @@ def summarize(args) -> list[dict]:
                             output_dim,
                             latent_scale,
                         )
+                        if eval_mode != "per_combo":
+                            row["status"] = "done" if manifest_current else (
+                                "stale_manifest" if manifest_path.exists() and status == "done" else (status or "missing")
+                            )
+                            rows.append(row)
+                            continue
                         if report_current and manifest_current:
                             report = report_payload(eval_path)
                             if report is None:
@@ -1371,7 +1919,13 @@ def run(args) -> None:
         f"H5 pool: {pool} games | train-game-counts (0=full): {args.train_game_counts}",
         flush=True,
     )
-    ensure_disturbtion_eval_caches(args)
+    if args.prepare_shared_eval_only:
+        ensure_disturbtion_eval_caches(args)
+        names, appids, titles = h5_game_metadata(args.h5)
+        ensure_raw_game_vector_cache(args, appids, names, titles)
+        load_or_build_description_raw_cache(args, appids, names, titles)
+        print("shared eval caches prepared; exiting before train/eval sweep.", flush=True)
+        return
     args.sweep_started_at = timestamp()
     write_sweep_manifest(args, "running", summarize(args))
     current = None
@@ -1431,7 +1985,7 @@ def run(args) -> None:
                                             ROOT,
                                         )
 
-                        if not args.skip_eval:
+                        if args.eval_mode == "per_combo":
                             eval_targets = []
                             for arm in arms:
                                 paths = combo_paths(args, output_dim, arm, train_games, view, latent_scale)
@@ -1443,6 +1997,9 @@ def run(args) -> None:
                                 for checkpoint, combo_dir in eval_targets:
                                     evaluate_combo(args, checkpoint, combo_dir)
                         write_sweep_manifest(args, "running", summarize(args), current=current)
+        if args.eval_mode == "final_best":
+            ensure_disturbtion_eval_caches(args)
+            evaluate_final_best(args)
         rows = summarize(args)
         done = sum(1 for row in rows if row["status"] == "done")
         final_status = "done" if done == len(rows) else "incomplete"
@@ -1518,6 +2075,14 @@ def parse_args():
     parser.add_argument("--eval-sample-fraction", type=float, default=0.6)
     parser.add_argument("--probe-folds", type=int, default=5)
     parser.add_argument("--max-game-sentences", type=int, default=4000)
+    parser.add_argument(
+        "--raw-cache-workers",
+        type=int,
+        default=0,
+        help="Workers for raw mean-pool cache. 0 uses CPU cores minus 1; 1 disables multiprocessing.",
+    )
+    parser.add_argument("--descriptions-dir", type=Path, default=DEFAULT_DESCRIPTIONS_DIR)
+    parser.add_argument("--max-description-sentences", type=int, default=256)
     parser.add_argument("--max-text-sentences", type=int, default=4096)
     parser.add_argument("--local-model", default=DEFAULT_LOCAL_MODEL)
     parser.add_argument("--embed-batch-size", type=int, default=32)
@@ -1538,10 +2103,27 @@ def parse_args():
         action="store_true",
         help="Rebuild sweep-level raw/text evaluation caches. Per-combo eval caches still use --rebuild-eval.",
     )
+    parser.add_argument(
+        "--prepare-shared-eval-only",
+        action="store_true",
+        help="Build shared raw/text evaluation caches, then exit before training or per-combo evaluation.",
+    )
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
-    parser.add_argument("--skip-eval", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--eval-mode",
+        choices=["per_combo", "final_best", "none"],
+        default="per_combo",
+        help=(
+            "per_combo evaluates every trained combo; final_best trains the sweep first "
+            "then evaluates one best full-train checkpoint; none disables evaluation."
+        ),
+    )
+    parser.add_argument("--skip-eval", action="store_true", help="Deprecated alias for --eval-mode none.")
+    args = parser.parse_args()
+    if args.skip_eval:
+        args.eval_mode = "none"
+    return args
 
 
 if __name__ == "__main__":
