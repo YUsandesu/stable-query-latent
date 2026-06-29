@@ -679,6 +679,8 @@ def parse_args():
     parser.add_argument("--limit-files", type=int, default=0,
                         help="Debug limit for sentence JSON files when building text H5.")
     parser.add_argument("--text-chunk-rows", type=int, default=8192)
+    parser.add_argument("--text-workers", type=int, default=0,
+                        help="Text H5 scan/shard workers (0 -> up to 16 CPU cores, 1 -> single process).")
     parser.add_argument("--tag-mapping", type=Path, default=DEFAULT_TAG_MAPPING)
     parser.add_argument("--no-tag-labels", action="store_true")
 
@@ -828,6 +830,7 @@ def main():
             overwrite=args.overwrite,
             limit_files=args.limit_files,
             chunk_rows=args.text_chunk_rows,
+            workers=args.text_workers,
             tag_mapping=args.tag_mapping,
             no_tag_labels=args.no_tag_labels,
             reviews_dirs=review_dirs,

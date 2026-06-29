@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
@@ -138,14 +139,53 @@ def iter_ordered_reviews(raw: dict) -> Iterable[tuple[str, list[tuple[str, str]]
 
 
 def load_sentence_mapping(path: Path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as file:
+    with Path(path).open("r", encoding="utf-8-sig") as file:
         raw = json.load(file)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} is not a review_id -> sentence mapping.")
     return raw
 
 
-def scan_sentence_files(sentences_dir: Path, limit_files: int = 0) -> tuple[list[dict], int, int]:
+def text_worker_count(workers: int, units: int) -> int:
+    if units <= 0:
+        return 1
+    if workers is None or int(workers) <= 0:
+        return max(1, min(os.cpu_count() or 4, units, 16))
+    return max(1, min(int(workers), units))
+
+
+def _scan_sentence_file(task: tuple[int, str]) -> dict | None:
+    index, path_text = task
+    path = Path(path_text)
+    raw = load_sentence_mapping(path)
+    review_lengths: list[int] = []
+    for _, sentences in iter_ordered_reviews(raw):
+        review_lengths.append(len(sentences))
+    sentence_count = int(sum(review_lengths))
+    if sentence_count == 0:
+        return {
+            "index": index,
+            "path": str(path),
+            "game_name": path.stem,
+            "reviews": 0,
+            "sentences": 0,
+            "empty": True,
+        }
+    return {
+        "index": index,
+        "path": str(path),
+        "game_name": path.stem,
+        "reviews": len(review_lengths),
+        "sentences": sentence_count,
+        "empty": False,
+    }
+
+
+def scan_sentence_files(
+    sentences_dir: Path,
+    limit_files: int = 0,
+    workers: int = 1,
+) -> tuple[list[dict], int, int]:
     files = sorted(Path(sentences_dir).glob("*.json"))
     if limit_files > 0:
         files = files[:limit_files]
@@ -155,31 +195,63 @@ def scan_sentence_files(sentences_dir: Path, limit_files: int = 0) -> tuple[list
     plans: list[dict] = []
     total_reviews = 0
     total_sentences = 0
-    for index, path in enumerate(files, start=1):
-        raw = load_sentence_mapping(path)
-        review_lengths: list[int] = []
-        for _, sentences in iter_ordered_reviews(raw):
-            review_lengths.append(len(sentences))
-        sentence_count = int(sum(review_lengths))
-        if sentence_count == 0:
-            print(f"[scan {index}/{len(files)}] {path.name}: skip (no sentences)", flush=True)
-            continue
-        plans.append(
-            {
-                "path": path,
-                "game_name": path.stem,
-                "reviews": len(review_lengths),
-                "sentences": sentence_count,
-            }
+    worker_count = text_worker_count(workers, len(files))
+    if worker_count <= 1:
+        iterator = (_scan_sentence_file((index, str(path))) for index, path in enumerate(files, start=1))
+        for result in iterator:
+            if result is None:
+                continue
+            index = int(result["index"])
+            path = Path(str(result["path"]))
+            if result.get("empty"):
+                print(f"[scan {index}/{len(files)}] {path.name}: skip (no sentences)", flush=True)
+            else:
+                result["path"] = path
+                plans.append(result)
+                total_reviews += int(result["reviews"])
+                total_sentences += int(result["sentences"])
+            if index % 100 == 0 or index == len(files):
+                print(
+                    f"[scan {index}/{len(files)}] games={len(plans)} "
+                    f"reviews={total_reviews} sentences={total_sentences}",
+                    flush=True,
+                )
+    else:
+        print(f"scan_sentence_files: using {worker_count} worker processes", flush=True)
+        results: list[dict] = []
+        completed = 0
+        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+            futures = [
+                pool.submit(_scan_sentence_file, (index, str(path)))
+                for index, path in enumerate(files, start=1)
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+                completed += 1
+                if completed % 100 == 0 or completed == len(files):
+                    non_empty = [item for item in results if not item.get("empty")]
+                    print(
+                        f"[scan {completed}/{len(files)}] scanned, "
+                        f"non_empty={len(non_empty)}",
+                        flush=True,
+                    )
+
+        for result in sorted(results, key=lambda item: int(item["index"])):
+            path = Path(str(result["path"]))
+            if result.get("empty"):
+                print(f"[scan {result['index']}/{len(files)}] {path.name}: skip (no sentences)", flush=True)
+                continue
+            result["path"] = path
+            plans.append(result)
+            total_reviews += int(result["reviews"])
+            total_sentences += int(result["sentences"])
+        print(
+            f"[scan done] games={len(plans)} reviews={total_reviews} "
+            f"sentences={total_sentences}",
+            flush=True,
         )
-        total_reviews += len(review_lengths)
-        total_sentences += sentence_count
-        if index % 100 == 0 or index == len(files):
-            print(
-                f"[scan {index}/{len(files)}] games={len(plans)} "
-                f"reviews={total_reviews} sentences={total_sentences}",
-                flush=True,
-            )
 
     if not plans:
         raise ValueError(f"No non-empty sentence mappings found in {sentences_dir}")
@@ -302,7 +374,7 @@ def load_games_json(path: Path) -> dict:
     path = Path(path)
     if not path.exists():
         return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} is not a JSON object keyed by appid.")
     return {str(key): value for key, value in data.items()}
@@ -395,6 +467,192 @@ def game_metadata(
     }
 
 
+def validate_text_shard(path: Path, plan: dict) -> bool:
+    path = Path(path)
+    if not path.exists():
+        return False
+    try:
+        with h5py.File(path, "r") as h5:
+            return (
+                decode_text(h5.attrs.get("schema", "")) == TEXT_H5_SCHEMA
+                and decode_text(h5.attrs.get("source_sentence_file", "")) == str(Path(plan["path"]).resolve())
+                and decode_text(h5.attrs.get("game_name", "")) == str(plan["game_name"])
+                and int(h5.attrs.get("reviews", -1)) == int(plan["reviews"])
+                and int(h5.attrs.get("sentences", -1)) == int(plan["sentences"])
+                and tuple(h5["texts"].shape) == (int(plan["sentences"]),)
+                and tuple(h5["sentence_ids"].shape) == (int(plan["sentences"]),)
+                and tuple(h5["review_ids"].shape) == (int(plan["reviews"]),)
+                and tuple(h5["review_offsets"].shape) == (int(plan["reviews"]) + 1,)
+                and int(h5["review_offsets"][0]) == 0
+                and int(h5["review_offsets"][-1]) == int(plan["sentences"])
+            )
+    except Exception:
+        return False
+
+
+def _write_text_shard(task: dict) -> dict:
+    plan = dict(task["plan"])
+    path = Path(plan["path"])
+    shard_path = Path(task["shard_path"])
+    games = task["games"]
+    review_dirs = [Path(value) for value in task["review_dirs"]]
+    label_min_length = int(task["label_min_length"])
+    chunk_rows = max(1, int(task["chunk_rows"]))
+    overwrite = bool(task["overwrite"])
+
+    if not overwrite and validate_text_shard(shard_path, plan):
+        return {
+            "index": int(plan["index"]),
+            "path": str(path),
+            "shard_path": str(shard_path),
+            "reviews": int(plan["reviews"]),
+            "sentences": int(plan["sentences"]),
+            "reused": True,
+        }
+
+    shard_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = atomic_h5_path(shard_path)
+    unlink_with_retry(tmp_path)
+    meta = game_metadata(
+        str(plan["game_name"]),
+        games,
+        reviews_dirs=review_dirs,
+        label_min_length=label_min_length,
+    )
+    raw = load_sentence_mapping(path)
+    review_count = int(plan["reviews"])
+    sentence_count = int(plan["sentences"])
+    sentence_chunk = max(1, min(chunk_rows, sentence_count))
+    review_chunk = max(1, min(chunk_rows, review_count))
+
+    try:
+        with h5py.File(tmp_path, "w") as h5:
+            h5.create_dataset(
+                "texts", shape=(sentence_count,), dtype=string_dtype(),
+                chunks=(sentence_chunk,),
+            )
+            h5.create_dataset(
+                "sentence_ids", shape=(sentence_count,), dtype=string_dtype(),
+                chunks=(sentence_chunk,),
+            )
+            h5.create_dataset(
+                "review_ids", shape=(review_count,), dtype=string_dtype(),
+                chunks=(review_chunk,),
+            )
+            h5.create_dataset("review_offsets", shape=(review_count + 1,), dtype=np.int64)
+            h5["review_offsets"][0] = 0
+
+            sentence_cursor = 0
+            review_cursor = 0
+            for review_id, sentences in iter_ordered_reviews(raw):
+                h5["review_ids"][review_cursor] = review_id
+                local_sentence_ids = [sentence_id for sentence_id, _ in sentences]
+                local_texts = [text for _, text in sentences]
+                count = len(local_texts)
+                end = sentence_cursor + count
+                h5["texts"][sentence_cursor:end] = local_texts
+                h5["sentence_ids"][sentence_cursor:end] = local_sentence_ids
+                sentence_cursor = end
+                review_cursor += 1
+                h5["review_offsets"][review_cursor] = sentence_cursor
+
+            if review_cursor != review_count or sentence_cursor != sentence_count:
+                raise RuntimeError(
+                    f"{path.name}: shard count mismatch "
+                    f"reviews {review_cursor}/{review_count}, "
+                    f"sentences {sentence_cursor}/{sentence_count}"
+                )
+
+            h5.attrs["schema"] = TEXT_H5_SCHEMA
+            h5.attrs["source_sentence_file"] = str(path.resolve())
+            h5.attrs["game_name"] = str(plan["game_name"])
+            h5.attrs["reviews"] = review_count
+            h5.attrs["sentences"] = sentence_count
+            for key, value in meta.items():
+                h5.attrs[f"meta_{key}"] = value
+
+        replace_with_retry(tmp_path, shard_path)
+    except BaseException:
+        best_effort_unlink(tmp_path)
+        raise
+
+    return {
+        "index": int(plan["index"]),
+        "path": str(path),
+        "shard_path": str(shard_path),
+        "reviews": review_count,
+        "sentences": sentence_count,
+        "reused": False,
+    }
+
+
+def write_text_shards(
+    plans: list[dict],
+    shard_dir: Path,
+    games: dict,
+    review_dirs: list[Path],
+    label_min_length: int,
+    chunk_rows: int,
+    workers: int,
+    overwrite: bool,
+) -> list[Path]:
+    shard_dir = Path(shard_dir)
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    worker_count = text_worker_count(workers, len(plans))
+    tasks: list[dict] = []
+    for row, plan in enumerate(plans):
+        shard_path = shard_dir / f"{row:06d}_{Path(plan['path']).stem}.h5"
+        plan["shard_path"] = shard_path
+        appid = str(plan["game_name"]).split("_", 1)[0]
+        tasks.append(
+            {
+                "plan": {
+                    "index": int(plan["index"]),
+                    "path": str(Path(plan["path"])),
+                    "game_name": str(plan["game_name"]),
+                    "reviews": int(plan["reviews"]),
+                    "sentences": int(plan["sentences"]),
+                },
+                "shard_path": str(shard_path),
+                "games": {appid: games.get(appid)},
+                "review_dirs": [str(Path(path)) for path in review_dirs],
+                "label_min_length": int(label_min_length),
+                "chunk_rows": int(chunk_rows),
+                "overwrite": bool(overwrite),
+            }
+        )
+
+    started = time.time()
+    if worker_count <= 1:
+        print("write_text_shards: using 1 worker process", flush=True)
+        for position, task in enumerate(tasks, start=1):
+            result = _write_text_shard(task)
+            if position % 25 == 0 or position == len(tasks):
+                action = "reused" if result["reused"] else "wrote"
+                print(
+                    f"[text-shard {position}/{len(tasks)}] {action} "
+                    f"{Path(result['path']).name} elapsed={time.time() - started:.1f}s",
+                    flush=True,
+                )
+    else:
+        print(f"write_text_shards: using {worker_count} worker processes", flush=True)
+        completed = 0
+        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(_write_text_shard, task) for task in tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                completed += 1
+                if completed % 25 == 0 or completed == len(tasks):
+                    action = "reused" if result["reused"] else "wrote"
+                    print(
+                        f"[text-shard {completed}/{len(tasks)}] last={action} "
+                        f"{Path(result['path']).name} elapsed={time.time() - started:.1f}s",
+                        flush=True,
+                    )
+
+    return [Path(plan["shard_path"]) for plan in plans]
+
+
 def write_string_dataset(h5: h5py.File, name: str, values: list[str] | np.ndarray) -> None:
     if name in h5:
         del h5[name]
@@ -437,6 +695,7 @@ def build_text_h5(
     overwrite: bool = False,
     limit_files: int = 0,
     chunk_rows: int = 8192,
+    workers: int = 0,
     tag_mapping: Path = DEFAULT_TAG_MAPPING,
     no_tag_labels: bool = False,
     reviews_dirs=None,
@@ -453,7 +712,21 @@ def build_text_h5(
     else:
         review_dirs = [Path(path) for path in reviews_dirs]
 
-    plans, total_reviews, total_sentences = scan_sentence_files(sentences_dir, limit_files)
+    worker_count = text_worker_count(workers, len(list(sentences_dir.glob("*.json"))))
+    plans, total_reviews, total_sentences = scan_sentence_files(
+        sentences_dir,
+        limit_files,
+        workers=worker_count,
+    )
+    review_cursor = 0
+    sentence_cursor = 0
+    for row, plan in enumerate(plans):
+        plan["row"] = row
+        plan["review_start"] = review_cursor
+        plan["sentence_start"] = sentence_cursor
+        review_cursor += int(plan["reviews"])
+        sentence_cursor += int(plan["sentences"])
+
     expected = text_h5_expected_counts(plans, total_reviews, total_sentences)
     if output_h5.exists() and not overwrite:
         valid, reason, _ = validate_text_h5(output_h5, expected)
@@ -479,154 +752,108 @@ def build_text_h5(
 
     games = load_games_json(games_json)
     output_h5.parent.mkdir(parents=True, exist_ok=True)
-    # Stable checkpoint file (NOT a random temp): kept across interruptions so a
-    # re-run resumes per-game instead of recomputing every game's CSV label scan.
-    partial_path = output_h5.with_name(output_h5.name + ".partial")
     started = time.time()
     chunk_sentences = max(1, min(int(chunk_rows), total_sentences))
     chunk_reviews = max(1, min(int(chunk_rows), total_reviews))
-    flush_every = 50  # games between durable checkpoints
-
-    # --- decide fresh build vs resume from an existing .partial checkpoint ---
-    games_done = 0
-    sentence_cursor = 0
-    review_cursor = 0
-    resume = False
-    if partial_path.exists() and not overwrite:
-        try:
-            with h5py.File(partial_path, "r") as h5:
-                same = (
-                    decode_text(h5.attrs.get("_partial_schema", "")) == TEXT_H5_SCHEMA
-                    and int(h5.attrs.get("games", -1)) == len(plans)
-                    and int(h5.attrs.get("reviews", -1)) == total_reviews
-                    and int(h5.attrs.get("sentences", -1)) == total_sentences
-                )
-                if same:
-                    games_done = int(h5.attrs.get("_games_done", 0))
-                    review_cursor = int(h5.attrs.get("_review_cursor", 0))
-                    sentence_cursor = int(h5.attrs.get("_sentence_cursor", 0))
-                    resume = 0 <= games_done <= len(plans)
-        except Exception as exc:
-            print(f"build_text_h5: cannot reuse checkpoint {partial_path} ({exc}); starting fresh", flush=True)
-            resume = False
-        if not resume:
-            best_effort_unlink(partial_path)
-
-    if resume:
-        print(
-            f"build_text_h5: resuming checkpoint games_done={games_done}/{len(plans)} "
-            f"reviews={review_cursor} sentences={sentence_cursor}",
-            flush=True,
-        )
-    else:
-        games_done = sentence_cursor = review_cursor = 0
+    shard_dir = output_h5.with_name(output_h5.name + ".shards")
+    partial_path = output_h5.with_name(output_h5.name + ".partial")
+    shard_paths = write_text_shards(
+        plans=plans,
+        shard_dir=shard_dir,
+        games=games,
+        review_dirs=review_dirs,
+        label_min_length=label_min_length,
+        chunk_rows=chunk_rows,
+        workers=worker_count,
+        overwrite=overwrite,
+    )
 
     try:
-        with h5py.File(partial_path, "r+" if resume else "w") as h5:
-            if not resume:
-                h5.create_dataset(
-                    "texts", shape=(total_sentences,), dtype=string_dtype(),
-                    chunks=(chunk_sentences,),
-                )
-                h5.create_dataset(
-                    "sentence_ids", shape=(total_sentences,), dtype=string_dtype(),
-                    chunks=(chunk_sentences,),
-                )
-                h5.create_dataset(
-                    "review_ids", shape=(total_reviews,), dtype=string_dtype(),
-                    chunks=(chunk_reviews,),
-                )
-                h5.create_dataset("review_offsets", shape=(total_reviews + 1,), dtype=np.int64)
-                h5.create_dataset("game_review_offsets", shape=(len(plans) + 1,), dtype=np.int64)
-                # Per-game metadata written incrementally so resume keeps it.
-                for name in (
-                    "game_names", "appids", "game_titles", "tags_json",
-                    "recommendation_label_source", "source_sentence_files",
-                ):
-                    h5.create_dataset(name, shape=(len(plans),), dtype=string_dtype())
-                h5.create_dataset("positive", shape=(len(plans),), dtype=np.int64)
-                h5.create_dataset("negative", shape=(len(plans),), dtype=np.int64)
-                h5.create_dataset("positive_rate", shape=(len(plans),), dtype=np.float32)
-                h5["review_offsets"][0] = 0
-                h5["game_review_offsets"][0] = 0
-                h5.attrs["games"] = len(plans)
-                h5.attrs["reviews"] = total_reviews
-                h5.attrs["sentences"] = total_sentences
-                h5.attrs["_games_done"] = 0
-                h5.attrs["_review_cursor"] = 0
-                h5.attrs["_sentence_cursor"] = 0
-                # Written LAST so a crash mid-creation leaves no resumable marker.
-                h5.attrs["_partial_schema"] = TEXT_H5_SCHEMA
-                h5.flush()
+        with h5py.File(partial_path, "w") as h5:
+            h5.create_dataset(
+                "texts", shape=(total_sentences,), dtype=string_dtype(),
+                chunks=(chunk_sentences,),
+            )
+            h5.create_dataset(
+                "sentence_ids", shape=(total_sentences,), dtype=string_dtype(),
+                chunks=(chunk_sentences,),
+            )
+            h5.create_dataset(
+                "review_ids", shape=(total_reviews,), dtype=string_dtype(),
+                chunks=(chunk_reviews,),
+            )
+            h5.create_dataset("review_offsets", shape=(total_reviews + 1,), dtype=np.int64)
+            h5.create_dataset("game_review_offsets", shape=(len(plans) + 1,), dtype=np.int64)
+            for name in (
+                "game_names", "appids", "game_titles", "tags_json",
+                "recommendation_label_source", "source_sentence_files",
+            ):
+                h5.create_dataset(name, shape=(len(plans),), dtype=string_dtype())
+            h5.create_dataset("positive", shape=(len(plans),), dtype=np.int64)
+            h5.create_dataset("negative", shape=(len(plans),), dtype=np.int64)
+            h5.create_dataset("positive_rate", shape=(len(plans),), dtype=np.float32)
 
             texts = h5["texts"]
             sentence_ids = h5["sentence_ids"]
             review_ids = h5["review_ids"]
             review_offsets = h5["review_offsets"]
             game_review_offsets = h5["game_review_offsets"]
+            review_offsets[0] = 0
+            game_review_offsets[0] = 0
 
-            def checkpoint(done_index: int) -> None:
-                h5.attrs["_games_done"] = done_index
-                h5.attrs["_review_cursor"] = review_cursor
-                h5.attrs["_sentence_cursor"] = sentence_cursor
-                h5.flush()
-
-            for game_index, plan in enumerate(plans, start=1):
-                if game_index <= games_done:
-                    continue
-                path = Path(plan["path"])
-                raw = load_sentence_mapping(path)
-                meta = game_metadata(
-                    str(plan["game_name"]),
-                    games,
-                    reviews_dirs=review_dirs,
-                    label_min_length=label_min_length,
-                )
-
+            for game_index, (plan, shard_path) in enumerate(zip(plans, shard_paths), start=1):
                 row = game_index - 1
-                h5["game_names"][row] = str(plan["game_name"])
-                h5["appids"][row] = meta["appid"]
-                h5["game_titles"][row] = meta["title"]
-                h5["tags_json"][row] = meta["tags_json"]
-                h5["recommendation_label_source"][row] = meta["label_source"]
-                h5["source_sentence_files"][row] = str(path.resolve())
-                h5["positive"][row] = int(meta["positive"])
-                h5["negative"][row] = int(meta["negative"])
-                h5["positive_rate"][row] = float(meta["positive_rate"])
+                review_start = int(plan["review_start"])
+                sentence_start = int(plan["sentence_start"])
+                review_end = review_start + int(plan["reviews"])
+                sentence_end = sentence_start + int(plan["sentences"])
+                path = Path(plan["path"])
 
-                written_reviews = 0
-                written_sentences = 0
-                for review_id, sentences in iter_ordered_reviews(raw):
-                    review_ids[review_cursor] = review_id
-                    local_sentence_ids = [sentence_id for sentence_id, _ in sentences]
-                    local_texts = [text for _, text in sentences]
-                    count = len(local_texts)
-                    end = sentence_cursor + count
-                    texts[sentence_cursor:end] = local_texts
-                    sentence_ids[sentence_cursor:end] = local_sentence_ids
-                    sentence_cursor = end
-                    review_cursor += 1
-                    review_offsets[review_cursor] = sentence_cursor
-                    written_reviews += 1
-                    written_sentences += count
+                if not validate_text_shard(shard_path, plan):
+                    raise RuntimeError(f"text shard validation failed: {shard_path}")
+                with h5py.File(shard_path, "r") as shard:
+                    for local_start in range(0, int(plan["sentences"]), chunk_sentences):
+                        local_end = min(local_start + chunk_sentences, int(plan["sentences"]))
+                        global_start = sentence_start + local_start
+                        global_end = sentence_start + local_end
+                        texts[global_start:global_end] = shard["texts"][local_start:local_end]
+                        sentence_ids[global_start:global_end] = shard["sentence_ids"][local_start:local_end]
 
-                game_review_offsets[game_index] = review_cursor
-                if game_index % flush_every == 0 or game_index == len(plans):
-                    checkpoint(game_index)
+                    for local_start in range(0, int(plan["reviews"]), chunk_reviews):
+                        local_end = min(local_start + chunk_reviews, int(plan["reviews"]))
+                        global_start = review_start + local_start
+                        global_end = review_start + local_end
+                        review_ids[global_start:global_end] = shard["review_ids"][local_start:local_end]
+
+                    review_offsets[review_start:review_end + 1] = (
+                        shard["review_offsets"][:] + sentence_start
+                    )
+                    game_review_offsets[game_index] = review_end
+                    h5["game_names"][row] = str(plan["game_name"])
+                    h5["appids"][row] = decode_text(shard.attrs["meta_appid"])
+                    h5["game_titles"][row] = decode_text(shard.attrs["meta_title"])
+                    h5["tags_json"][row] = decode_text(shard.attrs["meta_tags_json"])
+                    h5["recommendation_label_source"][row] = decode_text(shard.attrs["meta_label_source"])
+                    h5["source_sentence_files"][row] = str(path.resolve())
+                    h5["positive"][row] = int(shard.attrs["meta_positive"])
+                    h5["negative"][row] = int(shard.attrs["meta_negative"])
+                    h5["positive_rate"][row] = float(shard.attrs["meta_positive_rate"])
+
                 if game_index % 25 == 0 or game_index == len(plans):
                     elapsed = time.time() - started
                     print(
-                        f"[text-h5 {game_index}/{len(plans)}] {path.name}: "
-                        f"reviews={written_reviews} sentences={written_sentences} "
-                        f"total_sentences={sentence_cursor} elapsed={elapsed:.1f}s",
+                        f"[text-h5 merge {game_index}/{len(plans)}] {path.name}: "
+                        f"reviews={plan['reviews']} sentences={plan['sentences']} "
+                        f"total_sentences={sentence_end} elapsed={elapsed:.1f}s",
                         flush=True,
                     )
+                    h5.flush()
 
-            if review_cursor != total_reviews or sentence_cursor != total_sentences:
+            if int(review_offsets[-1]) != total_sentences or int(game_review_offsets[-1]) != total_reviews:
                 raise RuntimeError(
-                    "text_h5 write count mismatch: "
-                    f"reviews {review_cursor}/{total_reviews}, "
-                    f"sentences {sentence_cursor}/{total_sentences}"
+                    "text_h5 offset mismatch: "
+                    f"review_offsets[-1]={int(review_offsets[-1])}/{total_sentences}, "
+                    f"game_review_offsets[-1]={int(game_review_offsets[-1])}/{total_reviews}"
                 )
 
             # --- finalize: tag labels + public attrs, then drop resume markers ---
@@ -650,9 +877,6 @@ def build_text_h5(
                 [str(path.resolve()) for path in review_dirs],
                 ensure_ascii=False,
             )
-            for key in ("_partial_schema", "_games_done", "_review_cursor", "_sentence_cursor"):
-                if key in h5.attrs:
-                    del h5.attrs[key]
 
         replace_with_retry(partial_path, output_h5)
         write_text_h5_manifest(
@@ -666,8 +890,8 @@ def build_text_h5(
             status="written",
         )
     except BaseException:
-        # Keep partial_path so the next run resumes; only a successful build or an
-        # incompatible scan (handled above) removes it.
+        # Keep completed shards; the next run reuses matching shard files and
+        # rebuilds this partial H5 merge deterministically.
         raise
 
     print(
