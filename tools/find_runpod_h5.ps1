@@ -146,6 +146,7 @@ if (-not $sourceMatch.Success) {
     throw "Source must be an s3:// URI: $Source"
 }
 $bucket = $sourceMatch.Groups[1].Value
+$sourcePrefix = $sourceMatch.Groups[2].Value
 
 $sourceRoot = $Source.TrimEnd("/") + "/"
 $candidateKeys = @(
@@ -206,11 +207,12 @@ if (-not $Download) {
 foreach ($key in $uniqueMatches) {
     $src = $sourceRoot + $key
     $dst = Join-Path $Destination $key
+    $remoteKey = $sourcePrefix + $key
     $headJson = & $AwsCliPath s3api head-object `
         --region $Region `
         --endpoint-url $EndpointUrl `
         --bucket $bucket `
-        --key $key `
+        --key $remoteKey `
         --output json
 
     if ($LASTEXITCODE -ne 0 -or -not $headJson) {
@@ -219,7 +221,7 @@ foreach ($key in $uniqueMatches) {
     }
     else {
         $head = $headJson | ConvertFrom-Json
-        $match = Test-LocalMatchesRemote -LocalPath $dst -Bucket $bucket -Key $key -Head $head
+        $match = Test-LocalMatchesRemote -LocalPath $dst -Bucket $bucket -Key $remoteKey -Head $head
         if ($match.Matches) {
             Write-Host "Skipping $key ($($match.Reason))"
             continue
@@ -247,6 +249,6 @@ foreach ($key in $uniqueMatches) {
         if (-not $afterDownload.Matches) {
             throw "Downloaded file did not pass verification: $key ($($afterDownload.Reason))"
         }
-        Write-S3Meta -LocalPath $dst -Bucket $bucket -Key $key -Head $head
+        Write-S3Meta -LocalPath $dst -Bucket $bucket -Key $remoteKey -Head $head
     }
 }
