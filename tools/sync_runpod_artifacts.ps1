@@ -35,6 +35,11 @@ $includePatterns = @(
     "stable_query_latent_logs/*",
     "workspace/stable_query_latent_logs/*",
 
+    "*embedding_h5.h5",
+    "*embedding_h5.h5.incloud_manifest.json",
+    "*text_h5.h5",
+    "*text_h5.h5.manifest.json",
+
     "game_review_data/embedding_h5.h5",
     "game_review_data/embedding_h5.h5.incloud_manifest.json",
     "game_review_data/build_new_gamedata/text_h5.h5",
