@@ -106,6 +106,55 @@ STREAM_SOURCE_MONOLITH = "monolith"
 STREAM_SOURCE_STREAM = "stream"
 
 
+def _read_int_file(path: str) -> int | None:
+    try:
+        raw = Path(path).read_text(encoding="utf-8").strip()
+        return int(raw)
+    except (OSError, ValueError):
+        return None
+
+
+def effective_cpu_count() -> int:
+    """Return CPUs usable by this process, respecting affinity/cgroup limits."""
+    counts: list[int] = []
+    for name in ("EMBED_INCLOUD_CPU_COUNT", "SLURM_CPUS_PER_TASK", "OMP_NUM_THREADS"):
+        value = os.environ.get(name)
+        if value:
+            try:
+                parsed = int(value)
+            except ValueError:
+                continue
+            if parsed > 0:
+                counts.append(parsed)
+
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            counts.append(len(affinity(0)))
+        except OSError:
+            pass
+
+    # cgroup v2: "quota period", or "max period" when unlimited.
+    try:
+        raw = Path("/sys/fs/cgroup/cpu.max").read_text(encoding="utf-8").strip().split()
+        if len(raw) >= 2 and raw[0] != "max":
+            quota = int(raw[0])
+            period = int(raw[1])
+            if quota > 0 and period > 0:
+                counts.append(max(1, quota // period))
+    except (OSError, ValueError):
+        pass
+
+    # cgroup v1 fallback.
+    quota = _read_int_file("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    period = _read_int_file("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    if quota is not None and period and quota > 0:
+        counts.append(max(1, quota // period))
+
+    counts.append(os.cpu_count() or 1)
+    return max(1, min(counts))
+
+
 class FatGpuEmbedder:
     """Single-GPU Qwen3-Embedding with bf16 compute and last-token pooling.
 
@@ -210,12 +259,12 @@ class FatGpuEmbedder:
 
 def default_text_load_workers() -> int:
     """Default parallel H5 text-load workers: all visible CPU cores minus one."""
-    return max(1, (os.cpu_count() or 2) - 1)
+    return max(1, effective_cpu_count() - 1)
 
 
 def default_pretok_workers() -> int:
     """Default pre-tokenize workers: all visible CPU cores minus one."""
-    return max(1, (os.cpu_count() or 2) - 1)
+    return max(1, effective_cpu_count() - 1)
 
 
 # Per-worker tokenizer, built once via the pool initializer (spawn-safe: each
