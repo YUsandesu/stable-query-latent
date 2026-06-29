@@ -1516,6 +1516,7 @@ def train(args):
             args.pin_cache,
             args.game_order,
             args.max_batch_sentences,
+            args.max_view_sentences,
             args.train_game_indices,
         )
 
