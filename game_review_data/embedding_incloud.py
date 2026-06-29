@@ -48,6 +48,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from tools.logging_tee import run_with_optional_tee
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 try:
@@ -1767,11 +1769,16 @@ def parse_args():
     )
     parser.add_argument("--free-floor-bytes", default=8 * 1024**3, type=int, help="minimum free local bytes before work continues")
     parser.add_argument("--overwrite", action="store_true", help="discard any resume state and recompute")
+    parser.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    run_with_optional_tee(args.logout_address, run_main, args)
+
+
+def run_main(args):
     embed_incloud(
         input_h5=args.input_h5,
         output_h5=args.output_h5,

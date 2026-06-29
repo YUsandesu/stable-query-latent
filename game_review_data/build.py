@@ -34,6 +34,10 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tools.logging_tee import run_with_optional_tee
 
 
 def _download_stream(url: str, out_file: Path, total_hint: int = 0) -> None:
@@ -790,6 +794,7 @@ def parse_args():
     parser.add_argument("--embedding-compression", choices=["none", "gzip", "lzf"], default="none")
     parser.add_argument("--gzip-level", type=int, default=1)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
+    parser.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
     return parser.parse_args()
 
 
@@ -811,6 +816,10 @@ def resolve_args_paths(args: argparse.Namespace) -> argparse.Namespace:
 
 def main():
     args = resolve_args_paths(parse_args())
+    run_with_optional_tee(args.logout_address, run_main, args)
+
+
+def run_main(args: argparse.Namespace):
     started = time.time()
 
     data_dir: Path = args.data_dir

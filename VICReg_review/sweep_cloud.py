@@ -28,6 +28,7 @@ ROOT = SCRIPT_DIR.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tools.logging_tee import run_with_optional_tee
 from VICReg_review import run_data_view_sweep as sweep
 
 
@@ -273,11 +274,16 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    run_with_optional_tee(args.logout_address, run_main, args)
+
+
+def run_main(args) -> None:
     expand_train_game_counts(args)
     if args.tag_text_split_json is None:
         args.tag_text_split_json = args.out_dir / "tag_text_eval_split.json"
