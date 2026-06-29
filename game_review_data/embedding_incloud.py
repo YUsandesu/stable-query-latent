@@ -38,7 +38,7 @@ import os
 import sys
 import time
 import shutil
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -216,8 +216,8 @@ def _load_text_chunk(input_h5: Path, start: int, end: int) -> tuple[int, list[st
     import h5py
 
     with h5py.File(input_h5, "r") as h5:
-        raw = h5["texts"][int(start) : int(end)]
-    return int(start), [decode_text(value) for value in raw]
+        values = h5["texts"].asstr()[int(start) : int(end)].tolist()
+    return int(start), values
 
 
 def load_all_texts(
@@ -225,6 +225,7 @@ def load_all_texts(
     *,
     workers: int | None = None,
     chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
+    method: str = "auto",
     log_prefix: str = "embed_incloud: ",
 ) -> list[str]:
     """Read every sentence text into a Python list (held in host RAM)."""
@@ -241,44 +242,68 @@ def load_all_texts(
 
     worker_count = int(workers if workers is not None and workers > 0 else default_text_load_workers())
     chunk_size = max(1, int(chunk_size))
+    if method == "auto":
+        method = "serial"
+    if method == "serial":
+        worker_count = 1
+    if method not in {"thread", "process", "serial"}:
+        raise ValueError(f"unknown text preload method: {method}")
     ranges = [(start, min(start + chunk_size, total)) for start in range(0, total, chunk_size)]
     texts: list[str | None] = [None] * total
     started = time.time()
 
     print(
         f"{log_prefix}parallel text preload: workers={worker_count} "
-        f"chunk_size={chunk_size} chunks={len(ranges)}",
+        f"chunk_size={chunk_size} chunks={len(ranges)} method={method}",
         flush=True,
     )
 
     done = 0
     last_log = 0
-    log_stride = max(chunk_size * max(worker_count, 1) * 2, 1_000_000)
+    log_stride = max(chunk_size, 1_000_000)
+
+    def record_chunk(chunk_start: int, chunk: list[str]) -> None:
+        nonlocal done, last_log
+        texts[chunk_start : chunk_start + len(chunk)] = chunk
+        done += len(chunk)
+        if done == total or done - last_log >= log_stride:
+            last_log = done
+            elapsed = time.time() - started
+            rate = done / elapsed if elapsed > 0 else 0.0
+            print(f"{log_prefix}  loaded texts {done}/{total} ({rate:.0f}/s)", flush=True)
 
     if worker_count == 1 or len(ranges) == 1:
         for start, end in ranges:
             chunk_start, chunk = _load_text_chunk(input_h5, start, end)
-            texts[chunk_start : chunk_start + len(chunk)] = chunk
-            done += len(chunk)
-            if done == total or done - last_log >= log_stride:
-                last_log = done
-                elapsed = time.time() - started
-                rate = done / elapsed if elapsed > 0 else 0.0
-                print(f"{log_prefix}  loaded texts {done}/{total} ({rate:.0f}/s)", flush=True)
+            record_chunk(chunk_start, chunk)
     else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_load_text_chunk, input_h5, start, end) for start, end in ranges]
-            for future in as_completed(futures):
-                chunk_start, chunk = future.result()
-                texts[chunk_start : chunk_start + len(chunk)] = chunk
-                done += len(chunk)
-                if done == total or done - last_log >= log_stride:
-                    last_log = done
-                    elapsed = time.time() - started
-                    rate = done / elapsed if elapsed > 0 else 0.0
-                    print(f"{log_prefix}  loaded texts {done}/{total} ({rate:.0f}/s)", flush=True)
+        executor_cls = ProcessPoolExecutor if method == "process" else ThreadPoolExecutor
+        max_in_flight = min(len(ranges), max(worker_count * 2, worker_count))
+        with executor_cls(max_workers=worker_count) as executor:
+            in_flight = {}
+            next_submit = 0
 
-    return [text if text is not None else "" for text in texts]
+            def fill():
+                nonlocal next_submit
+                while next_submit < len(ranges) and len(in_flight) < max_in_flight:
+                    start, end = ranges[next_submit]
+                    future = executor.submit(_load_text_chunk, input_h5, start, end)
+                    in_flight[future] = (start, end)
+                    next_submit += 1
+
+            fill()
+            while in_flight:
+                ready, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in ready:
+                    in_flight.pop(future)
+                    chunk_start, chunk = future.result()
+                    record_chunk(chunk_start, chunk)
+                fill()
+
+    missing = sum(1 for text in texts if text is None)
+    if missing:
+        raise RuntimeError(f"text preload left {missing} rows empty")
+    return texts
 
 
 def manifest_path_for(output_h5: Path) -> Path:
@@ -840,6 +865,7 @@ def one_file_output(
     max_batch: int = 8192,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
+    text_load_method: str = "auto",
     overwrite: bool = False,
 ) -> Path:
     """Old monolith behavior: embed everything in RAM, then write one H5."""
@@ -877,6 +903,7 @@ def one_file_output(
         input_h5,
         workers=text_load_workers,
         chunk_size=text_load_chunk_size,
+        method=text_load_method,
     )
     total_sentences = len(texts)
     if total_sentences == 0:
@@ -1177,6 +1204,7 @@ def stream_cloud_output(
     max_batch: int = 8192,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
+    text_load_method: str = "auto",
     overwrite: bool = False,
     output_dir: Path | None = None,
     cloud_stream_dir: Path | None = None,
@@ -1213,6 +1241,7 @@ def stream_cloud_output(
         input_h5,
         workers=text_load_workers,
         chunk_size=text_load_chunk_size,
+        method=text_load_method,
     )
     total_sentences = len(texts)
     if total_sentences == 0:
@@ -1417,6 +1446,7 @@ def embed_incloud(
     max_batch: int = 8192,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
+    text_load_method: str = "auto",
     overwrite: bool = False,
     output_dir: Path | None = None,
     cloud_stream_dir: Path | None = None,
@@ -1445,6 +1475,7 @@ def embed_incloud(
             max_batch=max_batch,
             text_load_workers=text_load_workers,
             text_load_chunk_size=text_load_chunk_size,
+            text_load_method=text_load_method,
             overwrite=overwrite,
             output_dir=output_dir,
             cloud_stream_dir=cloud_stream_dir,
@@ -1471,6 +1502,7 @@ def embed_incloud(
         max_batch=max_batch,
         text_load_workers=text_load_workers,
         text_load_chunk_size=text_load_chunk_size,
+        text_load_method=text_load_method,
         overwrite=overwrite,
     )
 
@@ -1524,6 +1556,12 @@ def parse_args():
         type=int,
         help="sentences per H5 text preload task",
     )
+    parser.add_argument(
+        "--text-load-method",
+        choices=["auto", "thread", "process", "serial"],
+        default="auto",
+        help="H5 text preload executor; auto uses optimized serial HDF5 reads",
+    )
     parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--chunk-rows", default=2048, type=int)
     parser.add_argument("--compression", choices=["none", "gzip", "lzf"], default="none")
@@ -1562,6 +1600,7 @@ def main():
         max_batch=args.max_batch,
         text_load_workers=args.text_load_workers,
         text_load_chunk_size=args.text_load_chunk_size,
+        text_load_method=args.text_load_method,
         overwrite=args.overwrite,
         output_dir=args.output_dir,
         cloud_stream_dir=args.cloud_stream_dir,
