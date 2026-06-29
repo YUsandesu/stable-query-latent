@@ -131,6 +131,7 @@ class FatGpuEmbedder:
         )
 
         dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
+        self.model_name = model_name
         self.model = self._load_model(AutoModel, model_name, dtype, attn_impl)
         self.model = self.model.to(self.device).eval()
         self.embedding_dim = int(self.model.config.hidden_size)
@@ -210,6 +211,102 @@ class FatGpuEmbedder:
 def default_text_load_workers() -> int:
     """Default parallel H5 text-load workers: all visible CPU cores minus one."""
     return max(1, (os.cpu_count() or 2) - 1)
+
+
+def default_pretok_workers() -> int:
+    """Default pre-tokenize workers: all visible CPU cores minus one."""
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
+# Per-worker tokenizer, built once via the pool initializer (spawn-safe: each
+# worker re-imports transformers and loads its own fast tokenizer rather than
+# inheriting the parent's CUDA-initialized state).
+_PRETOK_STATE: dict = {}
+
+
+def _pretok_init(model_name: str, max_length: int) -> None:
+    # One tokenizing process per core => keep each tokenizer single-threaded so
+    # N processes don't each spawn N rayon threads (N*N thread thrash).
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    from transformers import AutoTokenizer
+
+    _PRETOK_STATE["tok"] = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    _PRETOK_STATE["max_length"] = int(max_length)
+
+
+def _pretok_chunk(payload):
+    """Tokenize one chunk of texts -> (offset, list[int32 ids]) (no padding)."""
+    offset, texts_chunk = payload
+    tok = _PRETOK_STATE["tok"]
+    max_length = _PRETOK_STATE["max_length"]
+    enc = tok(texts_chunk, padding=False, truncation=True, max_length=max_length)
+    ids = [np.asarray(item, dtype=np.int32) for item in enc["input_ids"]]
+    return offset, ids
+
+
+def _pretokenize_serial(texts, start, n, embedder, *, pre_chunk, log_prefix, pre_started):
+    """Single-thread pre-tokenization (relies on HF fast-tokenizer parallelism)."""
+    ids_cache: list = [None] * n
+    for c in range(0, n, pre_chunk):
+        upper = min(c + pre_chunk, n)
+        chunk_ids = embedder.tokenize_ids([texts[start + j] for j in range(c, upper)])
+        ids_cache[c:upper] = chunk_ids
+        if upper == n or (c // pre_chunk) % 5 == 0:
+            elapsed = time.time() - pre_started
+            rate = upper / elapsed if elapsed > 0 else 0.0
+            print(f"{log_prefix}  pre-tokenized {upper}/{n} ({rate:.0f}/s)", flush=True)
+    return ids_cache
+
+
+def _pretokenize_parallel(
+    texts, start, n, *, model_name, max_length, workers, pre_chunk, log_prefix, pre_started
+):
+    """Fan pre-tokenization across a spawn-based process pool (CPU-bound work)."""
+    import multiprocessing as mp
+
+    ids_cache: list = [None] * n
+    ranges = [(c, min(c + pre_chunk, n)) for c in range(0, n, pre_chunk)]
+    ctx = mp.get_context("spawn")
+    done = 0
+    last_log = 0
+    log_stride = max(pre_chunk * 4, 200_000)
+    max_in_flight = max(workers * 2, workers)
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=ctx,
+        initializer=_pretok_init,
+        initargs=(model_name, int(max_length)),
+    ) as executor:
+        in_flight = {}
+        next_submit = 0
+
+        def fill():
+            nonlocal next_submit
+            while next_submit < len(ranges) and len(in_flight) < max_in_flight:
+                c, upper = ranges[next_submit]
+                payload = (c, [texts[start + j] for j in range(c, upper)])
+                future = executor.submit(_pretok_chunk, payload)
+                in_flight[future] = (c, upper)
+                next_submit += 1
+
+        fill()
+        while in_flight:
+            ready, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in ready:
+                in_flight.pop(future)
+                offset, ids = future.result()
+                ids_cache[offset : offset + len(ids)] = ids
+                done += len(ids)
+            fill()
+            if done == n or done - last_log >= log_stride:
+                last_log = done
+                elapsed = time.time() - pre_started
+                rate = done / elapsed if elapsed > 0 else 0.0
+                print(
+                    f"{log_prefix}  pre-tokenized {done}/{n} ({rate:.0f}/s, {workers} procs)",
+                    flush=True,
+                )
+    return ids_cache
 
 
 def _load_text_chunk(input_h5: Path, start: int, end: int) -> tuple[int, list[str]]:
@@ -691,6 +788,8 @@ def embed_index_range(
     token_budget=0,
     max_batch=8192,
     max_length=2048,
+    pre_tok_workers=0,
+    pre_tok_chunk=50_000,
     log_prefix="",
 ):
     """Embed the contiguous original-order range [start, end) -> (end-start, dim).
@@ -703,20 +802,34 @@ def embed_index_range(
     n = end - start
     buf = np.empty((n, dim), dtype=vector_dtype)
 
-    # --- pre-tokenize the whole shard (bulk, fast-tokenizer Rust-parallel) ---
-    # GPU is idle during this CPU pass, so log progress or it looks frozen.
+    # --- pre-tokenize the whole shard (CPU-bound; GPU is idle until it ends) ---
+    # This is the slow serial spot on fat CPU boxes, so fan it across processes
+    # when workers > 1. Each worker holds its own single-threaded tokenizer.
     pre_started = time.time()
-    ids_cache: list = [None] * n
-    pre_chunk = 50_000
-    print(f"{log_prefix}pre-tokenizing {n} sentences (GPU idle until this finishes) ...", flush=True)
-    for c in range(0, n, pre_chunk):
-        upper = min(c + pre_chunk, n)
-        chunk_ids = embedder.tokenize_ids([texts[start + j] for j in range(c, upper)])
-        ids_cache[c:upper] = chunk_ids
-        if upper == n or (c // pre_chunk) % 5 == 0:
-            elapsed = time.time() - pre_started
-            rate = upper / elapsed if elapsed > 0 else 0.0
-            print(f"{log_prefix}  pre-tokenized {upper}/{n} ({rate:.0f}/s)", flush=True)
+    pre_chunk = max(1, int(pre_tok_chunk))
+    workers = int(pre_tok_workers) if pre_tok_workers and pre_tok_workers > 0 else default_pretok_workers()
+    use_parallel = workers > 1 and n >= 2 * pre_chunk
+    print(
+        f"{log_prefix}pre-tokenizing {n} sentences "
+        f"({'%d procs' % workers if use_parallel else 'serial'}; GPU idle until this finishes) ...",
+        flush=True,
+    )
+    if use_parallel:
+        ids_cache = _pretokenize_parallel(
+            texts,
+            start,
+            n,
+            model_name=embedder.model_name,
+            max_length=max_length,
+            workers=workers,
+            pre_chunk=pre_chunk,
+            log_prefix=log_prefix,
+            pre_started=pre_started,
+        )
+    else:
+        ids_cache = _pretokenize_serial(
+            texts, start, n, embedder, pre_chunk=pre_chunk, log_prefix=log_prefix, pre_started=pre_started
+        )
     lengths = [int(len(ids)) for ids in ids_cache]  # true token lengths
     order = list(range(n))  # local positions; row j == sentence start+j
     if sort:
@@ -863,6 +976,8 @@ def one_file_output(
     shard_size: int = DEFAULT_SHARD_SIZE,
     token_budget: int = 0,
     max_batch: int = 8192,
+    pre_tok_workers: int = 0,
+    pre_tok_chunk: int = 50_000,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
     text_load_method: str = "auto",
@@ -994,6 +1109,8 @@ def one_file_output(
             token_budget=token_budget,
             max_batch=max_batch,
             max_length=max_length,
+            pre_tok_workers=pre_tok_workers,
+            pre_tok_chunk=pre_tok_chunk,
             log_prefix=prefix,
         )
         with h5py.File(working, "a") as out:
@@ -1202,6 +1319,8 @@ def stream_cloud_output(
     shard_size: int = DEFAULT_SHARD_SIZE,
     token_budget: int = 0,
     max_batch: int = 8192,
+    pre_tok_workers: int = 0,
+    pre_tok_chunk: int = 50_000,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
     text_load_method: str = "auto",
@@ -1378,6 +1497,8 @@ def stream_cloud_output(
             token_budget=token_budget,
             max_batch=max_batch,
             max_length=max_length,
+            pre_tok_workers=pre_tok_workers,
+            pre_tok_chunk=pre_tok_chunk,
             log_prefix=f"[stream {shard['id']}] ",
         )
         shard_path = write_vectors_shard(
@@ -1444,6 +1565,8 @@ def embed_incloud(
     shard_size: int = DEFAULT_SHARD_SIZE,
     token_budget: int = 0,
     max_batch: int = 8192,
+    pre_tok_workers: int = 0,
+    pre_tok_chunk: int = 50_000,
     text_load_workers: int | None = None,
     text_load_chunk_size: int = DEFAULT_TEXT_LOAD_CHUNK_SIZE,
     text_load_method: str = "auto",
@@ -1473,6 +1596,8 @@ def embed_incloud(
             shard_size=shard_size,
             token_budget=token_budget,
             max_batch=max_batch,
+            pre_tok_workers=pre_tok_workers,
+            pre_tok_chunk=pre_tok_chunk,
             text_load_workers=text_load_workers,
             text_load_chunk_size=text_load_chunk_size,
             text_load_method=text_load_method,
@@ -1500,6 +1625,8 @@ def embed_incloud(
         shard_size=shard_size,
         token_budget=token_budget,
         max_batch=max_batch,
+        pre_tok_workers=pre_tok_workers,
+        pre_tok_chunk=pre_tok_chunk,
         text_load_workers=text_load_workers,
         text_load_chunk_size=text_load_chunk_size,
         text_load_method=text_load_method,
@@ -1542,7 +1669,19 @@ def parse_args():
     )
     parser.add_argument("--normalize", action="store_true", help="L2-normalize output vectors")
     parser.add_argument("--no-sort", dest="sort", action="store_false", help="disable length-sorted batching")
-    parser.add_argument("--tok-workers", default=4, type=int, help="CPU tokenization threads")
+    parser.add_argument("--tok-workers", default=4, type=int, help="CPU pad/collate threads during GPU forward")
+    parser.add_argument(
+        "--pre-tok-workers",
+        default=0,
+        type=int,
+        help="pre-tokenize processes (CPU-bound up-front pass); 0 uses cpu_count()-1, 1 forces serial",
+    )
+    parser.add_argument(
+        "--pre-tok-chunk",
+        default=50_000,
+        type=int,
+        help="sentences per pre-tokenize task",
+    )
     parser.add_argument("--prefetch", default=8, type=int, help="max tokenized batches kept in flight")
     parser.add_argument(
         "--text-load-workers",
@@ -1598,6 +1737,8 @@ def main():
         shard_size=args.shard_size,
         token_budget=args.token_budget,
         max_batch=args.max_batch,
+        pre_tok_workers=args.pre_tok_workers,
+        pre_tok_chunk=args.pre_tok_chunk,
         text_load_workers=args.text_load_workers,
         text_load_chunk_size=args.text_load_chunk_size,
         text_load_method=args.text_load_method,
