@@ -53,6 +53,12 @@ AUTO_BATCH_POINTS = (
     (48, 384),
 )
 
+AUTO_OUTER_BATCH_POINTS = (
+    (64, 1000),
+    (125, 4000),
+    (250, 8000),
+)
+
 
 def replace_with_retry(tmp_path: Path, output_path: Path, attempts: int = 8) -> None:
     for attempt in range(attempts):
@@ -317,6 +323,26 @@ def choose_auto_batch_size(total_vram_gib: float | None) -> tuple[int, int | Non
     return max(1, int(round(batch))), int(round(vram_gib))
 
 
+def choose_auto_outer_batch_size(total_ram_gib: float | None) -> tuple[int, int | None]:
+    if total_ram_gib is None:
+        return DEFAULT_SPLIT_OUTER_BATCH_SIZE, None
+
+    ram_gib = max(float(total_ram_gib), float(AUTO_OUTER_BATCH_POINTS[0][0]))
+    for (left_ram, left_batch), (right_ram, right_batch) in zip(
+        AUTO_OUTER_BATCH_POINTS, AUTO_OUTER_BATCH_POINTS[1:]
+    ):
+        if ram_gib <= right_ram:
+            fraction = (ram_gib - left_ram) / (right_ram - left_ram)
+            batch = left_batch + fraction * (right_batch - left_batch)
+            return max(1, int(round(batch))), int(round(ram_gib))
+
+    left_ram, left_batch = AUTO_OUTER_BATCH_POINTS[-2]
+    right_ram, right_batch = AUTO_OUTER_BATCH_POINTS[-1]
+    slope = (right_batch - left_batch) / (right_ram - left_ram)
+    batch = right_batch + (ram_gib - right_ram) * slope
+    return max(1, int(round(batch))), int(round(ram_gib))
+
+
 def resolve_batch_size(batch_size: int | None, device) -> tuple[int, int | None]:
     if batch_size and batch_size > 0:
         return int(batch_size), None
@@ -324,6 +350,17 @@ def resolve_batch_size(batch_size: int | None, device) -> tuple[int, int | None]
     total_vram_gib = get_cuda_total_memory_gib(device)
     resolved_batch_size, vram_tier_gib = choose_auto_batch_size(total_vram_gib)
     return resolved_batch_size, vram_tier_gib
+
+
+def resolve_outer_batch_size(
+    outer_batch_size: int | None,
+    total_ram_gib: float | None,
+) -> tuple[int, int | None]:
+    if outer_batch_size and outer_batch_size > 0:
+        return int(outer_batch_size), None
+
+    resolved_outer_batch_size, ram_tier_gib = choose_auto_outer_batch_size(total_ram_gib)
+    return resolved_outer_batch_size, ram_tier_gib
 
 
 def iter_review_chunks(normalized_reviews, chunk_budget):
@@ -482,7 +519,7 @@ def split_data(
     overwrite=False,
     splitter=None,
     batch_size=None,
-    outer_batch_size=DEFAULT_SPLIT_OUTER_BATCH_SIZE,
+    outer_batch_size=None,
     prefetch_ram_target=None,
     prefetch_max_files=None,
     prefetch_workers=None,
@@ -511,6 +548,10 @@ def split_data(
 
     resolved_budget, tier_gib, total_ram_gib = resolve_chunk_budget(chunk_budget)
     resolved_batch_size, vram_tier_gib = resolve_batch_size(batch_size, device)
+    resolved_outer_batch_size, outer_ram_tier_gib = resolve_outer_batch_size(
+        outer_batch_size,
+        total_ram_gib,
+    )
     (
         prefetch_ram_target,
         prefetch_max_files,
@@ -535,11 +576,20 @@ def split_data(
         batch_note = f"batch_size=auto(default {resolved_batch_size})"
     else:
         batch_note = f"batch_size=auto({vram_tier_gib}GiB VRAM->{resolved_batch_size})"
+    if outer_batch_size and outer_batch_size > 0:
+        outer_batch_note = f"outer_batch_size={resolved_outer_batch_size}"
+    elif outer_ram_tier_gib is None:
+        outer_batch_note = f"outer_batch_size=auto(default {resolved_outer_batch_size})"
+    else:
+        outer_batch_note = (
+            f"outer_batch_size=auto({outer_ram_tier_gib}GiB RAM->"
+            f"{resolved_outer_batch_size})"
+        )
     print(
         f"split_data: {len(input_files)}/{total_files} files, "
         f"shard={shard_index + 1}/{shard_count}, model={model}, device={device}, "
         f"{budget_note}, {batch_note}, "
-        f"outer_batch_size={outer_batch_size}, "
+        f"{outer_batch_note}, "
         f"prefetch_ram_target={prefetch_ram_target:.0%}, "
         f"prefetch_max_files={prefetch_max_files or 'unlimited'}, "
         f"prefetch_workers={prefetch_workers}, "
@@ -630,7 +680,7 @@ def split_data(
                 device,
                 chunk_budget=resolved_budget,
                 batch_size=resolved_batch_size,
-                outer_batch_size=outer_batch_size,
+                outer_batch_size=resolved_outer_batch_size,
             )
 
             pending_writes.append(
@@ -673,9 +723,9 @@ def parse_args():
     )
     parser.add_argument(
         "--outer-batch-size",
-        default=DEFAULT_SPLIT_OUTER_BATCH_SIZE,
+        default=None,
         type=int,
-        help="Internal wtpsplit SaT outer text batch size.",
+        help="Internal wtpsplit SaT outer text batch size. Default: auto from system RAM.",
     )
     parser.add_argument(
         "--prefetch-ram-target",

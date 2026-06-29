@@ -193,8 +193,6 @@ def split_data_parallel(args, metadata_dir: Path, sentences_dir: Path) -> None:
             args.split_model,
             "--chunk-budget",
             str(args.chunk_budget),
-            "--outer-batch-size",
-            str(args.split_outer_batch_size),
             "--shard-count",
             str(workers),
             "--shard-index",
@@ -202,6 +200,7 @@ def split_data_parallel(args, metadata_dir: Path, sentences_dir: Path) -> None:
         ]
         optional_arg(cmd, "--device", args.split_device)
         optional_arg(cmd, "--batch-size", args.split_batch_size)
+        optional_arg(cmd, "--outer-batch-size", args.split_outer_batch_size)
         optional_arg(cmd, "--prefetch-ram-target", args.split_prefetch_ram_target)
         optional_arg(
             cmd,
@@ -262,7 +261,7 @@ def parse_args():
     parser.add_argument("--split-device", default=None)
     parser.add_argument("--chunk-budget", type=int, default=0)
     parser.add_argument("--split-batch-size", type=int, default=None)
-    parser.add_argument("--split-outer-batch-size", type=int, default=1000)
+    parser.add_argument("--split-outer-batch-size", type=int, default=None)
     parser.add_argument("--split-prefetch-ram-target", type=float, default=None)
     parser.add_argument("--split-prefetch-max-files", type=int, default=None)
     parser.add_argument("--split-prefetch-workers", type=int, default=None)
