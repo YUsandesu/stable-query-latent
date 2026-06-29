@@ -21,7 +21,8 @@ param(
     [string]$EndpointUrl = "https://s3api-us-ks-2.runpod.io",
     [string]$AwsCliPath = "aws",
     [switch]$DryRun,
-    [switch]$PrintOnly
+    [switch]$PrintOnly,
+    [switch]$ShowCommand
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,11 +80,22 @@ function Format-CommandArg {
 }
 
 $commandPreview = $AwsCliPath + " " + (($awsArgs | ForEach-Object { Format-CommandArg $_ }) -join " ")
-Write-Host $commandPreview
 
 if ($PrintOnly) {
+    Write-Host $commandPreview
     return
 }
+
+Write-Host "RunPod selective artifact sync"
+Write-Host "  Source      : $Source"
+Write-Host "  Destination : $Destination"
+Write-Host "  Mode        : $(if ($DryRun) { 'dry-run preview' } else { 'download' })"
+Write-Host "  Includes    : text_h5.h5, embedding_h5.h5, manifests, VICReg_review/heads, artifacts, logs"
+if ($ShowCommand) {
+    Write-Host ""
+    Write-Host $commandPreview
+}
+Write-Host ""
 
 if (-not (Get-Command $AwsCliPath -ErrorAction SilentlyContinue)) {
     throw "AWS CLI not found: $AwsCliPath"
