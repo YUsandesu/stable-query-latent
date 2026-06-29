@@ -42,7 +42,10 @@ _BASE_BUILD_PAIRED_TRAIN_COMMAND = sweep.build_paired_train_command
 _BASE_SHOULD_TRY_PAIRED_TRAINING = sweep.should_try_paired_training
 _BASE_RUN_COMMAND = sweep.run_command
 _PAIRED_MODE = "always"
-_STANDARD_OOM_RULES: list[tuple[int, float]] = []
+# Standard backward keeps every long-view activation graph until the batch
+# loss runs backward. On 80GB A100s, 256+ slots at view=0.8 has been observed
+# to OOM mid-combo, especially while the decoupled probe worker shares the GPU.
+_STANDARD_OOM_RULES: list[tuple[int, float]] = [(256, 0.8)]
 _STANDARD_OOM_RETRY = True
 _STANDARD_OOM_FALLBACK = "split_recompute"
 _VRAM_FALLBACK_REPORTED = False
