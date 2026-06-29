@@ -10,6 +10,8 @@ the root directory of the cloud virtual machine / pod before running the workflo
 - `realtime_reader.ipynb`: log reader for checking progress while `run.ipynb` is
   running.
 - `start_old.ipynb`: older startup notebook kept for reference.
+- `../tools/sync_runpod_artifacts.ps1`: Windows helper that downloads only the
+  expensive RunPod artifacts from the RunPod S3 bucket.
 
 ## Workflow
 
@@ -26,3 +28,26 @@ the root directory of the cloud virtual machine / pod before running the workflo
 
 Interrupting Cell 2 only stops the log viewer. It does not stop the running
 pipeline.
+
+## Download RunPod Artifacts
+
+Use the selective sync helper instead of syncing the whole bucket:
+
+```powershell
+.\tools\sync_runpod_artifacts.ps1
+```
+
+The helper downloads only the high-cost corpus and experiment outputs generated
+by `run.ipynb`: `text_h5.h5`, `embedding_h5.h5`, their manifests,
+`VICReg_review/heads`, `stable_query_latent_artifacts`, and RunPod logs. Preview
+first with:
+
+```powershell
+.\tools\sync_runpod_artifacts.ps1 -DryRun
+```
+
+To print the generated `aws s3 sync` command without contacting S3:
+
+```powershell
+.\tools\sync_runpod_artifacts.ps1 -PrintOnly
+```
