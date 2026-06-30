@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 
 from tools.logging_tee import run_with_optional_tee
 from VICReg_review import run_data_view_sweep as sweep
+from VICReg_review import oom_proxy
 from VICReg_review.train_vicreg_review_h5 import parse_int_list
 
 
@@ -46,6 +47,12 @@ _PAIRED_MODE = "always"
 _STANDARD_OOM_RETRY = True
 _STANDARD_OOM_FALLBACK = "split_recompute"
 _VRAM_FALLBACK_REPORTED = False
+# Calibration / OOM-budget state (populated by install_calib when --calib-mode != off).
+_CALIB = None
+_GAME_STATS = None
+_FREE_VRAM_BYTES = 0.0
+_VRAM_SAFETY = 0.85
+_CALIB_ARGS = None
 AUTO_FULL_PASS_MIN_TOTAL_VRAM_GIB = 60.0
 AUTO_FULL_PASS_MIN_FREE_VRAM_GIB = 50.0
 AUTO_STEP_TIERS = (
@@ -210,6 +217,86 @@ def _select_backward_mode(args, view: float, latent_scale: float) -> str:
     return "standard"
 
 
+def _num_latents_for(args, latent_scale: float) -> int:
+    return sweep.effective_num_latents(args, latent_scale)
+
+
+def install_calib(args) -> None:
+    """Build or load the (num_latents, mode) -> (C, R) calibration and game stats.
+
+    See VICReg_review/oom_proxy.py for the memory model. When --calib-mode is
+    'off' (or calibration is unavailable) the sweep falls back to the legacy
+    VRAM-snapshot backward-mode selection.
+    """
+    global _CALIB, _GAME_STATS, _FREE_VRAM_BYTES, _VRAM_SAFETY, _CALIB_ARGS
+    _CALIB_ARGS = args
+    _VRAM_SAFETY = float(getattr(args, "vram_safety", 0.85))
+    mode = str(getattr(args, "calib_mode", "off"))
+    if mode == "off":
+        _CALIB = None
+        return
+
+    calib_json = getattr(args, "calib_json", None) or (args.out_dir / "calib.json")
+    args.calib_json = calib_json
+    nl_list = oom_proxy._num_latents_list(args.base_num_latents, args.latent_scales)
+    modes = ("standard", _STANDARD_OOM_FALLBACK)
+
+    try:
+        if mode == "measure":
+            print(f"calib: measuring (C,R) for num_latents={nl_list} modes={list(modes)}", flush=True)
+            _CALIB = oom_proxy.calibrate(
+                args.h5, nl_list, modes,
+                device=args.device, amp=True,
+                batch_size=args.batch_size, output_dim=max(args.output_dims),
+            )
+            oom_proxy.save_calib(_CALIB, calib_json)
+            print(f"calib: written {calib_json}", flush=True)
+        else:  # load
+            _CALIB = oom_proxy.load_calib(calib_json)
+            if _CALIB is None:
+                print(f"calib: {calib_json} not found; falling back to VRAM-snapshot mode", flush=True)
+                return
+
+        _GAME_STATS = oom_proxy.GameStats.from_h5(args.h5)
+        _FREE_VRAM_BYTES = oom_proxy._free_vram_bytes(args.device)
+    except BaseException as exc:  # never let calibration abort the sweep
+        print(f"calib: disabled after error ({type(exc).__name__}: {exc}); "
+              "using VRAM-snapshot backward-mode selection", flush=True)
+        _CALIB = None
+        _GAME_STATS = None
+        return
+    print(
+        f"calib: ready (free_vram={_FREE_VRAM_BYTES / oom_proxy.GIB:.1f}GiB "
+        f"safety={_VRAM_SAFETY})",
+        flush=True,
+    )
+
+
+def _plan_for(view: float, train_games: int, latent_scale: float, try_paired: bool):
+    """Per-combo memory plan, or None when calibration is unavailable."""
+    if _CALIB is None or _GAME_STATS is None or _CALIB_ARGS is None:
+        return None
+    args = _CALIB_ARGS
+    num_latents = _num_latents_for(args, latent_scale)
+    worst = _GAME_STATS.subset_worst_sentences(
+        train_games, args.train_game_seed, args.train_game_anchor_appids
+    )
+    return oom_proxy.plan_combo(
+        _CALIB, worst, _FREE_VRAM_BYTES, num_latents, view, args.batch_size,
+        modes=("standard", _STANDARD_OOM_FALLBACK), safety=_VRAM_SAFETY,
+        try_paired=try_paired,
+    )
+
+
+def _apply_plan_caps(cmd: list[str], plan) -> None:
+    if not plan:
+        return
+    if int(plan.get("max_batch_sentences", 0)) > 0:
+        _set_option(cmd, "--max-batch-sentences", plan["max_batch_sentences"])
+    if int(plan.get("max_view_sentences", 0)) > 0:
+        _set_option(cmd, "--max-view-sentences", plan["max_view_sentences"])
+
+
 def _manifest_error_is_oom(path: str | None) -> bool:
     if not path:
         return False
@@ -310,27 +397,38 @@ def _apply_cloud_train_options(cmd: list[str], args, backward_mode: str) -> list
 def build_train_command(args, output_dim: int, arm: str, train_games: int, view: float, combo_dir: Path, latent_scale: float = 1.0) -> list[str]:
     cmd = _BASE_BUILD_TRAIN_COMMAND(args, output_dim, arm, train_games, view, combo_dir, latent_scale)
     _set_option(cmd, "--probe-history-tsv", combo_dir / "dual_probe_history.tsv")
-    backward_mode = _select_backward_mode(args, view, latent_scale)
-    return _apply_cloud_train_options(cmd, args, backward_mode)
+    plan = _plan_for(view, train_games, latent_scale, try_paired=False)
+    backward_mode = plan["backward_mode"] if plan else _select_backward_mode(args, view, latent_scale)
+    cmd = _apply_cloud_train_options(cmd, args, backward_mode)
+    _apply_plan_caps(cmd, plan)
+    return cmd
 
 
 def build_paired_train_command(args, output_dim: int, train_games: int, view: float, latent_scale: float = 1.0) -> list[str]:
     cmd = _BASE_BUILD_PAIRED_TRAIN_COMMAND(args, output_dim, train_games, view, latent_scale)
-    backward_mode = _select_backward_mode(args, view, latent_scale)
-    return _apply_cloud_train_options(cmd, args, backward_mode)
+    plan = _plan_for(view, train_games, latent_scale, try_paired=True)
+    backward_mode = plan["backward_mode"] if plan else _select_backward_mode(args, view, latent_scale)
+    cmd = _apply_cloud_train_options(cmd, args, backward_mode)
+    _apply_plan_caps(cmd, plan)
+    return cmd
 
 
-def should_try_paired_training(output_dim: int, train_games: int, view: float) -> bool:
-    if _PAIRED_MODE == "always":
-        return True
+def should_try_paired_training(output_dim: int, train_games: int, view: float, latent_scale: float = 1.0) -> bool:
     if _PAIRED_MODE == "never":
         return False
+    plan = _plan_for(view, train_games, latent_scale, try_paired=True)
+    if plan is not None:
+        # Calibration decides: only pair when the budget fits two arms.
+        return bool(plan["paired"])
+    if _PAIRED_MODE == "always":
+        return True
     return _BASE_SHOULD_TRY_PAIRED_TRAINING(output_dim, train_games, view)
 
 
 def install_cloud_overrides(args) -> None:
     global _PAIRED_MODE
     _PAIRED_MODE = args.paired_mode
+    install_calib(args)
     sweep.build_train_command = build_train_command
     sweep.build_paired_train_command = build_paired_train_command
     sweep.should_try_paired_training = should_try_paired_training
@@ -449,6 +547,29 @@ def parse_args(argv: list[str] | None = None):
         choices=["always", "auto", "never"],
         default="always",
         help="Whether to try paired GRL/no-GRL training for fresh combinations.",
+    )
+    parser.add_argument(
+        "--calib-mode",
+        choices=["off", "load", "measure"],
+        default="measure",
+        help=(
+            "OOM-budget calibration (VICReg_review/oom_proxy.py). 'measure' runs a "
+            "pseudo-batch warm-up per num_latents/mode at startup to fit peak=R+C*S, "
+            "then plans per-combo backward-mode / paired / sentence caps. 'load' reuses "
+            "a prior calib.json. 'off' falls back to the legacy VRAM-snapshot selection."
+        ),
+    )
+    parser.add_argument(
+        "--calib-json",
+        type=Path,
+        default=None,
+        help="Calibration cache path. Defaults to <out-dir>/calib.json.",
+    )
+    parser.add_argument(
+        "--vram-safety",
+        type=float,
+        default=0.85,
+        help="Fraction of free VRAM the planner may budget (leaves room for context/fragmentation).",
     )
     parser.add_argument(
         "--train-probe-every",

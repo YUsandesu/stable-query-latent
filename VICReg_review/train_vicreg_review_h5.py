@@ -1700,7 +1700,7 @@ def train(args):
             executor.shutdown(wait=False)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-h5", default=str(DEFAULT_H5))
     parser.add_argument("--sst-checkpoint", default=str(DEFAULT_SST_CHECKPOINT))
@@ -1882,7 +1882,7 @@ def parse_args():
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=1)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():

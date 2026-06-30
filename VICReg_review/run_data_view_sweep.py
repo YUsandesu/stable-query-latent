@@ -368,11 +368,13 @@ def is_resumable_partial(args, output_dim: int, arm: str, train_games: int, view
     return payload.get("status") not in {None, "done"} and manifest_matches_config(paths["manifest"], args, arm, output_dim, latent_scale)
 
 
-def should_try_paired_training(output_dim: int, train_games: int, view: float) -> bool:
+def should_try_paired_training(output_dim: int, train_games: int, view: float, latent_scale: float = 1.0) -> bool:
     # The n=100/view=0.8 pair repeatedly OOMs on the 20GB Windows GPU.
     # Single-arm runs use the same seed and sampled batches while avoiding the
     # doubled activation/optimizer footprint. train_games <= 0 means the full
     # pool (the largest set), so it counts as "large" for this OOM guard.
+    # latent_scale is accepted so memory-aware overrides (sweep_cloud) can gate
+    # pairing on the num_latents axis too; the local heuristic ignores it.
     is_full = train_games <= 0
     if view >= 0.8 and (is_full or train_games >= 100):
         return False
@@ -1993,7 +1995,7 @@ def run(args) -> None:
                             grl_pair = {"grl", "nogrl"}.issubset(set(arms))
                             both_need_fresh = (
                                 grl_pair
-                                and should_try_paired_training(output_dim, train_games, view)
+                                and should_try_paired_training(output_dim, train_games, view, latent_scale)
                                 and combo_needs_train(args, output_dim, "grl", train_games, view, latent_scale)
                                 and combo_needs_train(args, output_dim, "nogrl", train_games, view, latent_scale)
                                 and not is_resumable_partial(args, output_dim, "grl", train_games, view, latent_scale)
