@@ -7,12 +7,16 @@ sampled, and the final VICReg loss is computed over a large batch of games.
 """
 
 import argparse
+import collections
 import json
 import math
+import multiprocessing
+import os
 import queue
 import sys
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -363,6 +367,130 @@ def make_epoch_indices(
     return [indices[start : start + batch_size] for start in range(0, len(indices), batch_size)]
 
 
+def effective_cpu_count() -> int:
+    """Visible CPU cores, respecting cgroup/affinity (RunPod may pin a subset)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
+
+
+def default_data_workers() -> int:
+    """Parallel H5-read workers. Matches the build pipeline's H5-load convention
+    (effective cores minus one, capped at 16); the x2 oversubscription goes into
+    the prefetch window, not the worker count."""
+    return max(1, min(16, effective_cpu_count() - 1))
+
+
+# Per-process read-only H5 handle, opened lazily and reused across tasks (the
+# spawn ProcessPool keeps workers alive). HDF5 is not fork-safe, so each worker
+# process must open its own handle -- spawn (not fork) guarantees that, and also
+# avoids inheriting the trainer's CUDA context.
+_PROC_H5: dict = {}
+
+
+def _proc_h5(h5_path):
+    handle = _PROC_H5.get(h5_path)
+    if handle is None:
+        handle = h5py.File(h5_path, "r")
+        _PROC_H5[h5_path] = handle
+    return handle
+
+
+def _load_game_views_np(task):
+    """Worker entry: read one game's vectors and sample two views. Returns numpy
+    arrays (picklable); torch conversion + pinning happen in the main process.
+    The per-game rng is seeded from (seed, epoch, flat_position) so the result is
+    deterministic and independent of which worker/order handles it."""
+    h5_path, game_index, sample_fraction, cache_dtype_name, max_view_sentences, seed_key = task
+    h5 = _proc_h5(h5_path)
+    cache_dtype = np.dtype(cache_dtype_name)
+    rng = np.random.default_rng(seed_key)
+    game_review_offsets = h5["game_review_offsets"]
+    review_offsets_ds = h5["review_offsets"]
+    vectors_ds = h5["vectors"]
+    review_start = int(game_review_offsets[game_index])
+    review_end = int(game_review_offsets[game_index + 1])
+    review_offsets = review_offsets_ds[review_start : review_end + 1].astype(np.int64)
+    sentence_start = int(review_offsets[0])
+    sentence_end = int(review_offsets[-1])
+    game_vectors = vectors_ds[sentence_start:sentence_end]
+    if game_vectors.dtype != cache_dtype:
+        game_vectors = game_vectors.astype(cache_dtype, copy=False)
+    relative_offsets = review_offsets - sentence_start
+    view_a = sample_view(game_vectors, relative_offsets, sample_fraction, rng, cache_dtype)
+    view_b = sample_view(game_vectors, relative_offsets, sample_fraction, rng, cache_dtype)
+    view_a = limit_view_sentences(view_a, max_view_sentences, rng)
+    view_b = limit_view_sentences(view_b, max_view_sentences, rng)
+    return view_a.numpy(), view_b.numpy()
+
+
+def _iter_parallel_batches(pool, h5_path, epoch_indices, game_names, sample_fraction,
+                           cache_dtype, pin_cache, max_view_sentences, base_seed, epoch,
+                           window_batches):
+    """Yield prepared batch dicts in order, loading games via the process pool with
+    a bounded look-ahead window (keeps workers fed without materialising the whole
+    epoch). Serves both full (collected into a list) and queue (streamed) modes."""
+    pin = bool(pin_cache) and torch.cuda.is_available()
+    dtype_name = np.dtype(cache_dtype).name
+    window = max(1, int(window_batches))
+    flat = 0
+    pending = collections.deque()
+    index_iter = iter(epoch_indices)
+
+    def submit_next():
+        nonlocal flat
+        try:
+            batch_indices = next(index_iter)
+        except StopIteration:
+            return False
+        futures = []
+        for game_index in batch_indices:
+            task = (h5_path, int(game_index), float(sample_fraction), dtype_name,
+                    int(max_view_sentences), (int(base_seed), int(epoch), int(flat)))
+            flat += 1
+            futures.append(pool.submit(_load_game_views_np, task))
+        pending.append((batch_indices, futures))
+        return True
+
+    for _ in range(window):
+        if not submit_next():
+            break
+    while pending:
+        batch_indices, futures = pending.popleft()
+        submit_next()  # refill the window
+        views_a, views_b, len_a, len_b, names = [], [], [], [], []
+        for game_index, future in zip(batch_indices, futures):
+            a_np, b_np = future.result()
+            view_a = torch.from_numpy(a_np)
+            view_b = torch.from_numpy(b_np)
+            if pin:
+                view_a = view_a.pin_memory()
+                view_b = view_b.pin_memory()
+            views_a.append(view_a)
+            views_b.append(view_b)
+            len_a.append(view_a.shape[0])
+            len_b.append(view_b.shape[0])
+            names.append(game_names[int(game_index)])
+        yield {
+            "view_a": views_a,
+            "view_b": views_b,
+            "games": names,
+            "indices": [int(g) for g in batch_indices],
+            "len_a": torch.tensor(len_a, dtype=torch.long),
+            "len_b": torch.tensor(len_b, dtype=torch.long),
+        }
+
+
+def make_data_pool(data_workers: int):
+    """Spawn-based process pool for parallel H5 reads (spawn = CUDA-safe + each
+    worker opens its own HDF5 handle). Returns None when single-worker (serial)."""
+    workers = int(data_workers) if int(data_workers) > 0 else default_data_workers()
+    if workers <= 1:
+        return None
+    return ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+
+
 def prepare_batch(h5, batch_indices, sample_fraction, rng, cache_dtype, pin_cache, max_view_sentences=0):
     game_names = h5["game_names"]
     views_a = []
@@ -408,9 +536,9 @@ def prepare_epoch_batches(
     max_batch_sentences,
     max_view_sentences,
     game_indices=None,
+    data_pool=None,
+    window_batches=4,
 ):
-    batches = []
-    rng = np.random.default_rng(seed + epoch * 1_000_003)
     with h5py.File(h5_path, "r") as h5:
         num_games = int(h5["game_names"].shape[0])
         counts = game_sentence_counts(h5) if (game_order != "random" or max_batch_sentences > 0) else None
@@ -424,19 +552,18 @@ def prepare_epoch_batches(
             max_batch_sentences=max_batch_sentences,
             game_indices=game_indices,
         )
-        for batch_indices in epoch_indices:
-            batches.append(
-                prepare_batch(
-                    h5,
-                    batch_indices,
-                    sample_fraction,
-                    rng,
-                    cache_dtype,
-                    pin_cache,
-                    max_view_sentences=max_view_sentences,
-                )
-            )
-    return batches
+        if data_pool is None:
+            rng = np.random.default_rng(seed + epoch * 1_000_003)
+            return [
+                prepare_batch(h5, batch_indices, sample_fraction, rng, cache_dtype,
+                              pin_cache, max_view_sentences=max_view_sentences)
+                for batch_indices in epoch_indices
+            ]
+        game_names = [decode_name(x) for x in h5["game_names"][:]]
+    # Parallel path: workers open their own H5 (outside this handle's context).
+    return list(_iter_parallel_batches(
+        data_pool, h5_path, epoch_indices, game_names, sample_fraction, cache_dtype,
+        pin_cache, max_view_sentences, seed, epoch, window_batches))
 
 
 class QueueEpochIterator:
@@ -455,6 +582,7 @@ class QueueEpochIterator:
         max_batch_sentences,
         max_view_sentences,
         game_indices=None,
+        data_pool=None,
     ):
         self.queue = queue.Queue(maxsize=max(1, prefetch_batches))
         self.thread = threading.Thread(
@@ -472,6 +600,8 @@ class QueueEpochIterator:
                 max_batch_sentences,
                 max_view_sentences,
                 game_indices,
+                data_pool,
+                max(1, prefetch_batches),
             ),
             daemon=True,
         )
@@ -491,9 +621,10 @@ class QueueEpochIterator:
         max_batch_sentences,
         max_view_sentences,
         game_indices,
+        data_pool,
+        window_batches,
     ):
         try:
-            rng = np.random.default_rng(seed + epoch * 1_000_003)
             with h5py.File(h5_path, "r") as h5:
                 num_games = int(h5["game_names"].shape[0])
                 counts = game_sentence_counts(h5) if (game_order != "random" or max_batch_sentences > 0) else None
@@ -507,18 +638,21 @@ class QueueEpochIterator:
                     max_batch_sentences=max_batch_sentences,
                     game_indices=game_indices,
                 )
-                for batch_indices in epoch_indices:
-                    self.queue.put(
-                        prepare_batch(
-                            h5,
-                            batch_indices,
-                            sample_fraction,
-                            rng,
-                            cache_dtype,
-                            pin_cache,
-                            max_view_sentences=max_view_sentences,
+                if data_pool is None:
+                    rng = np.random.default_rng(seed + epoch * 1_000_003)
+                    for batch_indices in epoch_indices:
+                        self.queue.put(
+                            prepare_batch(h5, batch_indices, sample_fraction, rng,
+                                          cache_dtype, pin_cache, max_view_sentences=max_view_sentences)
                         )
-                    )
+                    self.queue.put(None)
+                    return
+                game_names = [decode_name(x) for x in h5["game_names"][:]]
+            # Parallel streaming path (workers open their own H5 handles).
+            for batch in _iter_parallel_batches(
+                data_pool, h5_path, epoch_indices, game_names, sample_fraction, cache_dtype,
+                pin_cache, max_view_sentences, seed, epoch, window_batches):
+                self.queue.put(batch)
             self.queue.put(None)
         except BaseException as exc:
             self.queue.put(exc)
@@ -536,6 +670,8 @@ class QueueEpochIterator:
 
 
 def iter_epoch(args, epoch, next_epoch_future, executor, cache_dtype):
+    data_pool = getattr(args, "_data_pool", None)
+    window = max(1, int(args.prefetch_batches))
     if args.cache_mode == "full":
         batches = next_epoch_future.result()
         if epoch < args.epochs:
@@ -553,6 +689,8 @@ def iter_epoch(args, epoch, next_epoch_future, executor, cache_dtype):
                 args.max_batch_sentences,
                 args.max_view_sentences,
                 args.train_game_indices,
+                data_pool,
+                window,
             )
         else:
             future = None
@@ -572,6 +710,7 @@ def iter_epoch(args, epoch, next_epoch_future, executor, cache_dtype):
         args.max_batch_sentences,
         args.max_view_sentences,
         args.train_game_indices,
+        data_pool,
     )
     return iterator, None
 
@@ -1571,6 +1710,14 @@ def train(args):
         flush=True,
     )
 
+    args._data_pool = make_data_pool(getattr(args, "data_workers", 0))
+    if args._data_pool is not None:
+        print(
+            f"data loading: {args._data_pool._max_workers} parallel H5 read workers "
+            f"(spawn) | prefetch window={max(1, int(args.prefetch_batches))} batches",
+            flush=True,
+        )
+
     executor = None
     next_epoch_future = None
     if args.cache_mode == "full":
@@ -1591,6 +1738,8 @@ def train(args):
             args.max_batch_sentences,
             args.max_view_sentences,
             args.train_game_indices,
+            args._data_pool,
+            max(1, int(args.prefetch_batches)),
         )
 
     last_metrics = None
@@ -1700,6 +1849,9 @@ def train(args):
     finally:
         if executor is not None:
             executor.shutdown(wait=False)
+        data_pool = getattr(args, "_data_pool", None)
+        if data_pool is not None:
+            data_pool.shutdown(wait=False)
 
 
 def parse_args(argv=None):
@@ -1799,6 +1951,16 @@ def parse_args(argv=None):
     )
     parser.add_argument("--cache-mode", choices=["queue", "full"], default="queue")
     parser.add_argument("--prefetch-batches", type=int, default=2)
+    parser.add_argument(
+        "--data-workers",
+        type=int,
+        default=0,
+        help=(
+            "Parallel processes for H5 reads (0 = auto = visible cores-1, capped 16; "
+            "1 = serial). Hides network-FS (e.g. MooseFS) read latency so the GPU "
+            "isn't starved. Uses spawn (CUDA-safe); each worker opens its own H5."
+        ),
+    )
     parser.add_argument("--cache-dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--pin-cache", action="store_true")
     parser.add_argument(

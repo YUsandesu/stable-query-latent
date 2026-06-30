@@ -37,6 +37,7 @@ class TrainConfig:
     epochs: int = 30
     batch_size: int = 128
     seed: int = 42
+    data_workers: int = 0            # parallel H5 read procs (0=auto=cores-1, cap 16; 1=serial)
 
 
 @dataclass
@@ -187,7 +188,7 @@ def example_config() -> dict:
             "arms": ["grl", "nogrl"],
         },
         "model": {"latent_dim": 256, "reduce_hidden": [128], "expander_dim": 128, "expander_hidden": [128]},
-        "train": {"epochs": 30, "batch_size": 128, "seed": 42},
+        "train": {"epochs": 30, "batch_size": 128, "seed": 42, "data_workers": 0},
         "memory": {"vram_safety": 0.85, "calib": "measure"},
         "probe": {"every": 5, "start_epoch": 3},
         "data_seed": {"train_game_seed": 20260626, "anchors": ["1091500", "1385380"]},

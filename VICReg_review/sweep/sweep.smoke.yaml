@@ -27,6 +27,7 @@ train:
   epochs: 2
   batch_size: 128
   seed: 42
+  data_workers: 2       # small: validates the parallel loader without slow spawn startup
 
 memory:
   vram_safety: 0.85
