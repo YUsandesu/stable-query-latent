@@ -279,8 +279,6 @@ def _apply_cloud_train_options(cmd: list[str], args, backward_mode: str) -> list
     _set_option(cmd, "--cache-mode", args.cache_mode)
     _set_option(cmd, "--backward-mode", backward_mode)
     _set_option(cmd, "--prefetch-batches", args.prefetch_batches)
-    if args.max_batch_sentences > 0:
-        _set_option(cmd, "--max-batch-sentences", args.max_batch_sentences)
     _set_option(cmd, "--probe-every", args.train_probe_every)
     if args.probe_queue_dir:
         _set_option(cmd, "--probe-queue-dir", args.probe_queue_dir)
@@ -426,15 +424,6 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--cache-mode", choices=["queue", "full"], default="full")
     parser.add_argument("--prefetch-batches", type=int, default=2)
     parser.add_argument("--pin-cache", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument(
-        "--max-batch-sentences",
-        type=int,
-        default=0,
-        help=(
-            "Optional original-sentence budget per training batch. Use 0 for fixed "
-            "--batch-size; set this to smooth extreme long-game batches."
-        ),
-    )
     parser.add_argument(
         "--backward-mode",
         choices=["auto", "split_recompute", "recompute", "standard"],
