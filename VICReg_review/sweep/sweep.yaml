@@ -24,7 +24,7 @@ train:
   epochs: 30
   batch_size: 128
   seed: 42
-  data_workers: 0       # parallel H5 read procs: 0=auto (cores-1, cap 16); hides MooseFS latency
+  data_workers: 8       # parallel H5 read procs (plenty once the H5 is on local disk)
 
 memory:
   vram_safety: 0.85                 # fraction of free VRAM the planner may budget

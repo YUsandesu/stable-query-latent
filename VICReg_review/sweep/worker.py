@@ -72,6 +72,8 @@ def maybe_calibrate(config: SweepConfig, device: str) -> None:
 
 def main_loop(args) -> int:
     config = SweepConfig.load(args.config)
+    if getattr(args, "h5", None):
+        config.h5 = str(args.h5)
     out_dir = config.out_dir
     pid = os.getpid()
     poll = max(0.5, float(args.poll_interval))
@@ -136,6 +138,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--out-dir", default=None, help="Override config.out_dir (rarely needed).")
+    p.add_argument("--h5", default=None, help="Override config.h5 (e.g. a local-disk copy).")
     p.add_argument("--device", default="cuda")
     p.add_argument("--poll-interval", type=float, default=2.0)
     p.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")

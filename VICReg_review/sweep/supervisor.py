@@ -57,10 +57,12 @@ def _free_vram_bytes_smi() -> float:
 class Supervisor:
     def __init__(self, config: SweepConfig, config_path=None, *, spawn_worker=None,
                  free_vram_fn=None, calib=None, stats=None, poll=2.0,
-                 ready_timeout=3600.0, reclaim_timeout=600.0, logout_address=None):
+                 ready_timeout=3600.0, reclaim_timeout=600.0, logout_address=None,
+                 h5_override=None):
         self.config = config
         self.config_path = config_path
         self.logout_address = logout_address
+        self.h5_override = h5_override
         self.out_dir = config.out_dir
         self.ledger = Ledger(Path(config.out_dir) / "ledger.jsonl")
         self.probe_queue = Path(config.out_dir) / "probe_queue"
@@ -77,6 +79,8 @@ class Supervisor:
     def _default_spawn(self):
         argv = [sys.executable, "-u", str(SCRIPT_DIR / "worker.py"),
                 "--config", str(self.config_path), "--device", "cuda"]
+        if self.h5_override:
+            argv += ["--h5", str(self.h5_override)]
         if self.logout_address:
             argv += ["--logout-address", str(self.logout_address)]
         return subprocess.Popen(argv, cwd=str(ROOT))
@@ -237,13 +241,19 @@ class Supervisor:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--h5", default=None,
+                   help="Override config.h5 (e.g. a fast local-disk copy of the embedding H5). "
+                        "Only the H5 input is redirected; checkpoints/ledger stay at out_dir.")
     p.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
     return p.parse_args(argv)
 
 
 def run_main(args) -> None:
     config = SweepConfig.load(args.config)
-    summary = Supervisor(config, config_path=args.config, logout_address=args.logout_address).run()
+    if args.h5:
+        config.h5 = str(args.h5)
+    summary = Supervisor(config, config_path=args.config, logout_address=args.logout_address,
+                         h5_override=args.h5).run()
     print(f"sweep done: {summary}", flush=True)
 
 

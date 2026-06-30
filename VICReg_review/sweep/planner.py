@@ -81,6 +81,7 @@ def format_table(rows: list[dict], free_vram_bytes: float, safety: float, pool: 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--h5", default=None, help="Override config.h5 (e.g. a local-disk copy).")
     p.add_argument("--calib-json", type=Path, default=None,
                    help="Calibration cache. Defaults to <out_dir>/calib.json.")
     p.add_argument("--free-vram-gib", type=float, default=None,
@@ -92,6 +93,8 @@ def _parse_args(argv=None):
 def main(argv=None) -> None:
     args = _parse_args(argv)
     config = SweepConfig.load(args.config)
+    if args.h5:
+        config.h5 = str(args.h5)
     calib_json = args.calib_json or (Path(config.out_dir) / "calib.json")
     calib = oom_proxy.load_calib(calib_json)
     if calib is None:
