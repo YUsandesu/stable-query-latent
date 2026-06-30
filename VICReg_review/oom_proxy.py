@@ -104,23 +104,50 @@ def _read_int_file(path: str):
         return None
 
 
-def available_ram_bytes() -> float:
-    """Usable host RAM (cgroup-aware: limit - current), else psutil, else 0.
+def _read_cgroup_stat() -> dict:
+    for path in ("/sys/fs/cgroup/memory.stat", "/sys/fs/cgroup/memory/memory.stat"):
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        stat = {}
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                try:
+                    stat[parts[0]] = int(parts[1])
+                except ValueError:
+                    pass
+        if stat:
+            return stat
+    return {}
 
-    0 means "unknown" -- callers should then NOT force a RAM downgrade (assume
-    enough and let the reactive SIGKILL path handle it)."""
-    limit = _read_int_file("/sys/fs/cgroup/memory.max")
-    current = _read_int_file("/sys/fs/cgroup/memory.current")
-    if limit is None:
-        limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-        current = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-    if limit is not None and 0 < limit < (1 << 60):
-        return float(max(0, limit - current)) if current is not None else float(limit)
-    try:
-        import psutil
-        return float(psutil.virtual_memory().available)
-    except Exception:
-        return 0.0
+
+def available_ram_bytes() -> float:
+    """Usable host RAM = limit - NON-reclaimable usage (anon + shmem).
+
+    Page cache (cgroup memory.stat 'file') counts toward memory.current but is
+    reclaimable -- the kernel drops it under pressure -- so it must NOT be treated
+    as used. Reading the 150GB H5 fills page cache and would otherwise make this
+    report ~0 free and force the planner into queue mode for no reason.
+    0 means "unknown" -> callers should not force a RAM downgrade."""
+    limit = (_read_int_file("/sys/fs/cgroup/memory.max")
+             or _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+    if not (limit and 0 < limit < (1 << 60)):
+        try:
+            import psutil
+            return float(psutil.virtual_memory().available)
+        except Exception:
+            return 0.0
+    stat = _read_cgroup_stat()
+    anon = stat.get("anon", stat.get("rss"))      # v2 'anon', v1 'rss'
+    if anon is not None:
+        non_reclaimable = anon + stat.get("shmem", 0) + stat.get("unevictable", 0)
+        return float(max(0, limit - non_reclaimable))
+    # last resort: limit - current (counts page cache; conservative)
+    current = (_read_int_file("/sys/fs/cgroup/memory.current")
+               or _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+    return float(max(0, limit - (current or 0)))
 
 
 def estimate_full_cache_bytes(total_sentences: int, view: float, input_dim: int,
