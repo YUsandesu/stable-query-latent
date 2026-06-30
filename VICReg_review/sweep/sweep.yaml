@@ -1,0 +1,38 @@
+# Declarative VICReg review sweep. One file = the whole experiment.
+# Run a dry-run memory plan before launching:
+#   python -m VICReg_review.sweep.planner --config VICReg_review/sweep/sweep.yaml \
+#       --calib-json VICReg_review/heads/cloud_full_sweep_a100/calib.json --free-vram-gib 79
+experiment: cloud_full_sweep_a100
+h5: game_review_data/embedding_h5.h5
+out_dir: VICReg_review/heads/cloud_full_sweep_a100
+
+grid:
+  output_dims: [18, 36, 64, 72]
+  latent_scales: [1, 2, 4]          # -> num_latents 256 / 512 / 1024
+  base_num_latents: 256
+  train_game_counts: [50, 100, 200, 500, 1000, 1500, 2000, all]   # 'all' = full pool
+  sample_fractions: [0.8, 0.6, 0.4, 0.2]
+  arms: [grl, nogrl]
+
+model:
+  latent_dim: 256
+  reduce_hidden: [128]
+  expander_dim: 128
+  expander_hidden: [128]
+
+train:
+  epochs: 30
+  batch_size: 128
+  seed: 42
+
+memory:
+  vram_safety: 0.85                 # fraction of free VRAM the planner may budget
+  calib: measure                    # measure | load | off
+
+probe:
+  every: 5
+  start_epoch: 3
+
+data_seed:
+  train_game_seed: 20260626
+  anchors: ["1091500", "1385380"]

@@ -15,10 +15,12 @@ so the encoder is always the adversarial party.
 """
 
 from pathlib import Path
+import math
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 class _GradientReverseFn(torch.autograd.Function):
@@ -254,9 +256,14 @@ class HierarchicalLatentArrayMLP(nn.Module):
         self.cross_attention = nn.MultiheadAttention(
             latent_dim,
             _heads_for_dim(latent_dim, num_heads),
-            dropout=dropout,
+            dropout=0.0,  # no attention-weight dropout: it would break exact sentence-chunking
             batch_first=True,
         )
+        # Regularization moved off the (chunked) sentence axis onto the latent
+        # array: element-wise dropout of the learnable queries. This keeps the
+        # stem exactly chunkable (the mask is drawn once, outside the chunk loop)
+        # while still preventing latent-slot co-adaptation.
+        self.latent_dropout = nn.Dropout(dropout)
         self.dropout = nn.Dropout(dropout)
         self.self_attention = LatentSelfAttentionBlock(
             latent_dim,
@@ -279,17 +286,77 @@ class HierarchicalLatentArrayMLP(nn.Module):
                 for index in range(len(dims) - 1)
             ]
         )
+        # Default sentence-chunk size for the stem cross-attention. None = no
+        # chunking (the trainer sets this from the per-combo memory plan so
+        # forward_view/split_recompute pick it up without extra plumbing).
+        self._stem_chunk_size = None
 
-    def forward_stem(self, x, key_padding_mask=None):
-        context = self.context_norm(self.input_proj(self.input_norm(x)))
-        queries = self.latent_array.unsqueeze(0).expand(x.size(0), -1, -1)
-        attended, _ = self.cross_attention(
-            query=self.query_norm(queries),
-            key=context,
-            value=context,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )
+    def _cross_attend_chunked(self, x, queries, chunk_size):
+        """Sentence->latent cross-attention computed in key-chunks.
+
+        Same math as ``self.cross_attention`` (it reuses its in/out projection
+        weights), but the per-sentence context pipeline + attention scores are
+        recomputed per chunk under ``checkpoint`` during training, so peak
+        activation memory is O(chunk + num_latents) instead of O(num_sentences).
+        Uses the FlashAttention online-softmax merge, so the result is exact
+        (up to floating-point reordering) regardless of ``chunk_size``.
+        """
+        mha = self.cross_attention
+        bsz, n_sentences, _ = x.shape
+        dim = self.latent_dim
+        heads = mha.num_heads
+        head_dim = dim // heads
+        scale = 1.0 / math.sqrt(head_dim)
+        w_q, w_k, w_v = mha.in_proj_weight.split(dim, dim=0)
+        b_q, b_k, b_v = mha.in_proj_bias.split(dim, dim=0)
+        n_latents = queries.size(1)
+        q = F.linear(self.query_norm(queries), w_q, b_q).view(bsz, n_latents, heads, head_dim).transpose(1, 2)
+
+        def chunk_contrib(x_chunk, q_):
+            ctx = self.context_norm(self.input_proj(self.input_norm(x_chunk)))
+            k = F.linear(ctx, w_k, b_k).view(bsz, -1, heads, head_dim).transpose(1, 2)
+            v = F.linear(ctx, w_v, b_v).view(bsz, -1, heads, head_dim).transpose(1, 2)
+            scores = torch.matmul(q_, k.transpose(-2, -1)) * scale          # [B,H,Lq,c]
+            chunk_max = scores.amax(dim=-1)                                 # [B,H,Lq]
+            weights = torch.exp(scores - chunk_max.unsqueeze(-1))
+            denom = weights.sum(dim=-1)                                     # [B,H,Lq]
+            out = torch.matmul(weights, v)                                  # [B,H,Lq,Dh]
+            return chunk_max, denom, out
+
+        run_max = run_l = run_o = None
+        for start in range(0, n_sentences, chunk_size):
+            x_chunk = x[:, start:start + chunk_size, :]
+            if self.training and torch.is_grad_enabled():
+                c_max, c_l, c_o = checkpoint(chunk_contrib, x_chunk, q, use_reentrant=False)
+            else:
+                c_max, c_l, c_o = chunk_contrib(x_chunk, q)
+            if run_max is None:
+                run_max, run_l, run_o = c_max, c_l, c_o
+            else:
+                new_max = torch.maximum(run_max, c_max)
+                alpha = torch.exp(run_max - new_max)
+                beta = torch.exp(c_max - new_max)
+                run_l = alpha * run_l + beta * c_l
+                run_o = alpha.unsqueeze(-1) * run_o + beta.unsqueeze(-1) * c_o
+                run_max = new_max
+        attended = (run_o / run_l.unsqueeze(-1)).transpose(1, 2).reshape(bsz, n_latents, dim)
+        return F.linear(attended, mha.out_proj.weight, mha.out_proj.bias)
+
+    def forward_stem(self, x, key_padding_mask=None, chunk_size=None):
+        if chunk_size is None:
+            chunk_size = getattr(self, "_stem_chunk_size", None)
+        queries = self.latent_dropout(self.latent_array).unsqueeze(0).expand(x.size(0), -1, -1)
+        if chunk_size and key_padding_mask is None and x.size(1) > int(chunk_size):
+            attended = self._cross_attend_chunked(x, queries, int(chunk_size))
+        else:
+            context = self.context_norm(self.input_proj(self.input_norm(x)))
+            attended, _ = self.cross_attention(
+                query=self.query_norm(queries),
+                key=context,
+                value=context,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
         latents = queries + self.dropout(attended)
         return self.output_norm(self.self_attention(latents))
 
@@ -298,8 +365,8 @@ class HierarchicalLatentArrayMLP(nn.Module):
             latents = stage(latents)
         return latents
 
-    def forward(self, x, key_padding_mask=None):
-        return self.forward_tail(self.forward_stem(x, key_padding_mask=key_padding_mask))
+    def forward(self, x, key_padding_mask=None, chunk_size=None):
+        return self.forward_tail(self.forward_stem(x, key_padding_mask=key_padding_mask, chunk_size=chunk_size))
 
 
 class GameCentroidExpander(nn.Module):

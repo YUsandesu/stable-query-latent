@@ -92,6 +92,9 @@ ARCH_FLAGS = {
 }
 
 DEFAULT_MODES = ("standard", "split_recompute")
+# Conservative stem chunk used when a combo has no calibration entry (keeps the
+# chunked stem bounded rather than running an unchunked, possibly-OOM forward).
+NO_CALIB_CHUNK = 2048
 # Total forwarded sentences (both views) probed per calibration point. Kept
 # small so calibration never OOMs even at num_latents=1024; >=2 successes are
 # enough to fit the line.
@@ -375,6 +378,54 @@ def plan_combo(calib: dict, worst_game_sentences: int, free_vram_bytes: float,
         "est_peak_gib": round(chosen["est_peak_bytes"] / GIB, 2),
         "budget_gib": round(budget / GIB, 2),
         "note": note,
+    }
+
+
+def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: float,
+                       num_latents: int, view: float, batch_size: int, *,
+                       safety: float = 0.85, try_paired: bool = True,
+                       mode: str = "standard") -> dict:
+    """Chunked-stem plan: never drop sentences, pick a stem chunk size instead.
+
+    The chunked stem (model.HierarchicalLatentArrayMLP, chunk_size) bounds the
+    per-game stem peak to ~R + C*chunk, so ANY game trains in full -- the only
+    levers are the chunk size and whether two arms (paired) fit. Chunk size is
+    derived from the same calibrated (C, R) as the cap planner; factors are
+    conservative (err small = safe) pending a chunked-stem recalibration on GPU.
+    """
+    budget = float(free_vram_bytes) * float(safety)
+    entry = calib.get(_calib_key(num_latents, mode)) or calib.get(_calib_key(num_latents, "split_recompute"))
+    if not entry:
+        # No calibration for this num_latents: fall back to a small conservative
+        # chunk (never 0 -- 0 means "don't chunk" and would risk OOM).
+        return {"num_latents": int(num_latents), "view": float(view),
+                "worst_game_sentences": int(worst_game_sentences),
+                "backward_mode": mode, "paired": False,
+                "stem_chunk_size": NO_CALIB_CHUNK,
+                "budget_gib": round(budget / GIB, 2),
+                "note": "no calibration; conservative chunk"}
+    C, R = float(entry["C"]), float(entry["R"])
+
+    def chunk_for(resident_R: float) -> int:
+        # Per-chunk peak ~ resident_R + C * chunk_sentences; /2 keeps a margin
+        # for both views held in standard mode. Floor at 1 so it always fits.
+        return max(1, int((budget - resident_R) / (2.0 * C)))
+
+    paired = bool(try_paired) and (budget - 2.0 * R) > 0
+    resident_R = 2.0 * R if paired else R
+    chunk = chunk_for(resident_R)
+    if budget - resident_R <= 0:           # model itself doesn't fit: can't pair
+        paired = False
+        chunk = chunk_for(R)
+    return {
+        "num_latents": int(num_latents),
+        "view": float(view),
+        "worst_game_sentences": int(worst_game_sentences),
+        "backward_mode": mode,
+        "paired": bool(paired),
+        "stem_chunk_size": int(chunk),
+        "budget_gib": round(budget / GIB, 2),
+        "note": "ok" if chunk < worst_game_sentences else "chunk >= biggest game (single pass)",
     }
 
 

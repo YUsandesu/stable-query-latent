@@ -1489,6 +1489,8 @@ def train(args):
             recommendation_targets[mask] = np.nan
 
     model, expander, adversary, optimizer = build_training_components(args, input_dim, device)
+    if getattr(args, "stem_chunk_size", 0) and int(args.stem_chunk_size) > 0:
+        model._stem_chunk_size = int(args.stem_chunk_size)
     amp_enabled = args.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     pin_transfer = args.pin_cache and device.type == "cuda"
@@ -1765,6 +1767,16 @@ def parse_args(argv=None):
         help=(
             "Optional cap on sampled sentences for each single-game training view. "
             "This prevents rare ultra-long games from OOMing the attention block."
+        ),
+    )
+    parser.add_argument(
+        "--stem-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "Sentence chunk size for the stem cross-attention (0 = no chunking). "
+            "Bounds per-game stem memory to ~O(chunk) via online-softmax + recompute, "
+            "so full games train without dropping sentences. Set from the memory plan."
         ),
     )
     parser.add_argument("--sample-fraction", type=float, default=0.6)

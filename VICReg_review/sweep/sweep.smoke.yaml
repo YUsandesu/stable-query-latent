@@ -1,0 +1,38 @@
+# Tiny end-to-end smoke sweep -- run this FIRST on a fresh pod to validate the
+# whole path (calibrate -> worker -> train -> ledger -> probe queue) cheaply,
+# before launching sweep.yaml. ~4 combos x 2 epochs.
+#   python -u VICReg_review/sweep/supervisor.py --config VICReg_review/sweep/sweep.smoke.yaml
+experiment: cloud_full_sweep_a100_smoke
+h5: game_review_data/embedding_h5.h5
+out_dir: VICReg_review/heads/cloud_smoke
+
+grid:
+  output_dims: [18]
+  latent_scales: [1]
+  base_num_latents: 256
+  train_game_counts: [50, 100]
+  sample_fractions: [0.8]
+  arms: [grl, nogrl]
+
+model:
+  latent_dim: 256
+  reduce_hidden: [128]
+  expander_dim: 128
+  expander_hidden: [128]
+
+train:
+  epochs: 2
+  batch_size: 128
+  seed: 42
+
+memory:
+  vram_safety: 0.85
+  calib: measure
+
+probe:
+  every: 0          # no probes for the smoke run
+  start_epoch: 3
+
+data_seed:
+  train_game_seed: 20260626
+  anchors: ["1091500", "1385380"]
