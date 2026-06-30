@@ -18,6 +18,8 @@ recovery loop can be tested without a GPU.
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -85,7 +87,30 @@ class Supervisor:
             argv += ["--h5", str(self.h5_override)]
         if self.logout_address:
             argv += ["--logout-address", str(self.logout_address)]
-        return subprocess.Popen(argv, cwd=str(ROOT))
+        # start_new_session so the worker + its data-pool children form one
+        # process group we can kill cleanly. expandable_segments reduces the
+        # allocator fragmentation the OOM messages keep flagging.
+        env = {**os.environ, "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+        return subprocess.Popen(argv, cwd=str(ROOT), start_new_session=True, env=env)
+
+    def _kill_worker(self) -> None:
+        """Make sure the previous worker (and its data-pool children) are dead
+        before respawning, so a worker that OOM'd but is slow to release its CUDA
+        context does not leave the GPU full for the next one."""
+        w = self.worker
+        if w is None or w.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(w.pid), signal.SIGKILL)   # whole process group
+        except Exception:
+            try:
+                w.kill()
+            except Exception:
+                pass
+        try:
+            w.wait(timeout=30)
+        except Exception:
+            pass
 
     def _worker_alive(self) -> bool:
         return bool(self.worker) and self.worker.poll() is None
@@ -94,6 +119,7 @@ class Supervisor:
         return getattr(self.worker, "pid", None)
 
     def _wait_ready(self) -> None:
+        self._kill_worker()           # never leave an old worker holding the GPU
         protocol.clear_signals(self.out_dir)
         self.worker = self._spawn()
         deadline = time.time() + self.ready_timeout
@@ -115,8 +141,9 @@ class Supervisor:
         # best effort: proceed even if we couldn't confirm reclamation
 
     def _recover_worker(self) -> None:
-        self._poll_until_free()
-        self._wait_ready()
+        self._kill_worker()           # kill the stuck/old worker first ...
+        self._poll_until_free()       # ... then wait for its GPU memory to return
+        self._wait_ready()            # ... then spawn a fresh one
 
     # --- planning / downgrade ---------------------------------------------
     def _ensure_inputs(self) -> None:

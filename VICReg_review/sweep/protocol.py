@@ -95,7 +95,12 @@ def pending_jobs(out_dir) -> list[Path]:
 
 
 def mark_job_consumed(job_file) -> None:
-    Path(job_file).rename(str(job_file) + ".done")
+    # Tolerant: the supervisor may have already cleared the job (e.g. it reacted
+    # to the result and moved on) -- renaming a gone file must not crash the worker.
+    try:
+        Path(job_file).rename(str(job_file) + ".done")
+    except OSError:
+        pass
 
 
 def write_heartbeat(out_dir, pid: int, combo_id: str | None = None) -> None:
