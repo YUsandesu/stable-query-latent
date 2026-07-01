@@ -74,6 +74,8 @@ def main_loop(args) -> int:
     config = SweepConfig.load(args.config)
     if getattr(args, "h5", None):
         config.h5 = str(args.h5)
+    if getattr(args, "out_dir", None):
+        config.out_dir = str(args.out_dir)   # keep calib.json + checkpoints on the same shard dir
     qdir = args.queue_dir or protocol.default_qdir(config.out_dir)
     pid = os.getpid()
     poll = max(0.5, float(args.poll_interval))

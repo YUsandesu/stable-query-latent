@@ -69,13 +69,16 @@ class Supervisor:
                  free_vram_fn=None, calib=None, stats=None, poll=2.0,
                  ready_timeout=3600.0, reclaim_timeout=600.0, logout_address=None,
                  h5_override=None, retry_failed=False, gpu=0, qdir=None,
-                 no_calib=False, ram_divisor=1):
+                 no_calib=False, ram_divisor=1, shard=(0, 1)):
         self.config = config
         self.config_path = config_path
         self.logout_address = logout_address
         self.h5_override = h5_override
         self.retry_failed = retry_failed
         self.gpu = int(gpu)
+        # Disjoint slice of the sweep for this machine: (index, count). (0, 1) =
+        # whole sweep. Two VMs use shard (0, 2) and (1, 2) with separate out_dirs.
+        self._shard = (int(shard[0]), max(1, int(shard[1])))
         self.no_calib = bool(no_calib)
         self.out_dir = config.out_dir
         self.qdir = Path(qdir) if qdir is not None else protocol.default_qdir(self.out_dir)
@@ -124,7 +127,7 @@ class Supervisor:
     def _default_spawn(self, gpu, qdir):
         argv = [sys.executable, "-u", str(SCRIPT_DIR / "worker.py"),
                 "--config", str(self.config_path), "--device", "cuda",
-                "--queue-dir", str(qdir)]
+                "--queue-dir", str(qdir), "--out-dir", str(self.out_dir)]
         if self.no_calib:
             argv += ["--no-calib"]           # calib was pre-computed once by _ensure_calib
         if self.h5_override:
@@ -214,7 +217,8 @@ class Supervisor:
     def _pre_calibrate(self, calib_path) -> None:
         print(f"supervisor: calibrating once on gpu {self.gpu} ...", flush=True)
         argv = [sys.executable, "-u", str(SCRIPT_DIR / "worker.py"),
-                "--config", str(self.config_path), "--device", "cuda", "--calib-only"]
+                "--config", str(self.config_path), "--device", "cuda", "--calib-only",
+                "--out-dir", str(self.out_dir)]
         if self.h5_override:
             argv += ["--h5", str(self.h5_override)]
         if self.logout_address:
@@ -300,6 +304,14 @@ class Supervisor:
         if n:
             print(f"supervisor: reset {n} failed combos for retry", flush=True)
 
+    def _sharded_combos(self) -> list:
+        """This machine's disjoint slice of the grid (combo idx %% N == i)."""
+        combos = list(self.config.iter_combos())
+        i, n = self._shard
+        if n > 1:
+            combos = [c for idx, c in enumerate(combos) if idx % n == i]
+        return combos
+
     def _prepare(self) -> None:
         """Shared, run once (by the primary lane): reconcile, calibrate, load
         stats, and build the shared grid iterator. Safe to call before spawning
@@ -307,11 +319,14 @@ class Supervisor:
         self.ledger.reconcile_running()
         if self.retry_failed:
             self._reset_failed()
-        self.total = self.config.combo_count()
-        self._grid = enumerate(self.config.iter_combos(), 1)
+        combos = self._sharded_combos()
+        self.total = len(combos)
+        self._grid = enumerate(combos, 1)
         self._ensure_calib()
         self._ensure_inputs()
-        print(f"supervisor: {self.total} combos to process", flush=True)
+        i, n = self._shard
+        shard_note = f" (shard {i}/{n} of {self.config.combo_count()})" if n > 1 else ""
+        print(f"supervisor: {self.total} combos to process{shard_note}", flush=True)
 
     def _claim(self):
         """Thread-safe: pull the next combo still needing work. Returns
@@ -426,7 +441,7 @@ class Supervisor:
 def run_sweep(config: SweepConfig, config_path, gpus, *, logout_address=None,
               h5_override=None, retry_failed=False, poll=2.0, ready_timeout=3600.0,
               reclaim_timeout=600.0, spawn_worker=None, free_vram_fn=None,
-              calib=None, stats=None) -> dict:
+              calib=None, stats=None, shard=(0, 1)) -> dict:
     """Drive the sweep across ``gpus``. One lane per GPU, each with its own worker
     (pinned via CUDA_VISIBLE_DEVICES) and its own job queue subdir; all lanes share
     one ledger + grid + tally so every combo is trained exactly once. A single GPU
@@ -444,7 +459,8 @@ def run_sweep(config: SweepConfig, config_path, gpus, *, logout_address=None,
                   spawn_worker=spawn_worker, free_vram_fn=free_vram_fn)
 
     primary = Supervisor(config, gpu=gpus[0], qdir=qdir_for(gpus[0]),
-                         retry_failed=retry_failed, calib=calib, stats=stats, **common)
+                         retry_failed=retry_failed, calib=calib, stats=stats,
+                         shard=shard, **common)
     primary._prepare()                       # reconcile + one-off calib + stats + grid
     lanes = [primary]
     for g in gpus[1:]:
@@ -474,12 +490,24 @@ def _parse_gpus(spec: str) -> list[int]:
     return [int(x) for x in str(spec).replace(",", " ").split()]
 
 
+def _parse_shard(spec: str) -> tuple[int, int]:
+    i, _, n = str(spec).partition("/")
+    i, n = int(i), int(n)
+    if n < 1 or not (0 <= i < n):
+        raise SystemExit(f"--shard must be 'i/N' with 0 <= i < N (got {spec!r})")
+    return i, n
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--h5", default=None,
                    help="Override config.h5 (e.g. a fast local-disk copy of the embedding H5). "
                         "Only the H5 input is redirected; checkpoints/ledger stay at out_dir.")
+    p.add_argument("--out-dir", default=None,
+                   help="Override config.out_dir (ledger + checkpoints + calib). Give each "
+                        "machine its own out_dir when sharding one sweep across VMs, so their "
+                        "ledgers never contend on the network FS.")
     p.add_argument("--logout-address", default=None, help="Append stdout/stderr to this log file.")
     p.add_argument("--retry-failed", action="store_true",
                    help="Reset 'failed' combos (attempts exhausted) back to pending so they "
@@ -489,7 +517,12 @@ def parse_args(argv=None):
     p.add_argument("--gpus", default=None,
                    help="Comma/space-separated physical GPU ids to run across concurrently, "
                         "one worker per GPU (e.g. '0,1,2,3'). Combos are split across GPUs via a "
-                        "shared ledger; each GPU trains a different combo at the same time.")
+                        "shared in-process grid; each GPU trains a different combo at the same time.")
+    p.add_argument("--shard", default=None,
+                   help="Run only a DISJOINT slice of the sweep: 'i/N' means keep combos whose "
+                        "index %% N == i. Use to split ONE sweep across independent machines, each "
+                        "with its own --out-dir: VM A '--shard 0/2', VM B '--shard 1/2'. Within a "
+                        "machine, --gpus still parallelises that machine's slice across its GPUs.")
     return p.parse_args(argv)
 
 
@@ -497,9 +530,12 @@ def run_main(args) -> None:
     config = SweepConfig.load(args.config)
     if args.h5:
         config.h5 = str(args.h5)
+    if args.out_dir:
+        config.out_dir = str(args.out_dir)
     gpus = _parse_gpus(args.gpus) if args.gpus else [args.gpu]
+    shard = _parse_shard(args.shard) if args.shard else (0, 1)
     summary = run_sweep(config, args.config, gpus, logout_address=args.logout_address,
-                        h5_override=args.h5, retry_failed=args.retry_failed)
+                        h5_override=args.h5, retry_failed=args.retry_failed, shard=shard)
     print(f"sweep done: {summary}", flush=True)
 
 
