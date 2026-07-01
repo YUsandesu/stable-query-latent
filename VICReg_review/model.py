@@ -311,16 +311,25 @@ class HierarchicalLatentArrayMLP(nn.Module):
         b_q, b_k, b_v = mha.in_proj_bias.split(dim, dim=0)
         n_latents = queries.size(1)
         q = F.linear(self.query_norm(queries), w_q, b_q).view(bsz, n_latents, heads, head_dim).transpose(1, 2)
+        # The score/softmax/accumulation must run in >=fp32: under AMP the fused
+        # nn.MultiheadAttention upcasts softmax to fp32 for stability, and a hand
+        # rolled fp16 online-softmax overflows -> NaN. promote_types keeps fp64
+        # for the exactness test and lifts fp16/bf16 to fp32.
+        red_dtype = torch.promote_types(x.dtype, torch.float32)
 
         def chunk_contrib(x_chunk, q_):
             ctx = self.context_norm(self.input_proj(self.input_norm(x_chunk)))
             k = F.linear(ctx, w_k, b_k).view(bsz, -1, heads, head_dim).transpose(1, 2)
             v = F.linear(ctx, w_v, b_v).view(bsz, -1, heads, head_dim).transpose(1, 2)
-            scores = torch.matmul(q_, k.transpose(-2, -1)) * scale          # [B,H,Lq,c]
-            chunk_max = scores.amax(dim=-1)                                 # [B,H,Lq]
-            weights = torch.exp(scores - chunk_max.unsqueeze(-1))
-            denom = weights.sum(dim=-1)                                     # [B,H,Lq]
-            out = torch.matmul(weights, v)                                  # [B,H,Lq,Dh]
+            # autocast(enabled=False) so the upcast actually sticks (otherwise
+            # autocast would pull the matmuls back to fp16).
+            with torch.autocast(device_type=x_chunk.device.type, enabled=False):
+                qf, kf, vf = q_.to(red_dtype), k.to(red_dtype), v.to(red_dtype)
+                scores = torch.matmul(qf, kf.transpose(-2, -1)) * scale     # [B,H,Lq,c]
+                chunk_max = scores.amax(dim=-1)                             # [B,H,Lq]
+                weights = torch.exp(scores - chunk_max.unsqueeze(-1))
+                denom = weights.sum(dim=-1)                                 # [B,H,Lq]
+                out = torch.matmul(weights, vf)                            # [B,H,Lq,Dh]
             return chunk_max, denom, out
 
         run_max = run_l = run_o = None
