@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -34,12 +35,20 @@ if str(ROOT) not in sys.path:
 from tools.logging_tee import run_with_optional_tee  # noqa: E402
 from VICReg_review import oom_proxy  # noqa: E402
 from VICReg_review.sweep import jobspec, protocol  # noqa: E402
+from VICReg_review.sweep.coordination import Coordinator, LeaseLiveness  # noqa: E402
 from VICReg_review.sweep.config import SweepConfig  # noqa: E402
 from VICReg_review.sweep.ledger import Ledger, pid_alive  # noqa: E402
 
 MAX_ATTEMPTS = 4
 MIN_CHUNK = 64
 _SIGKILL = getattr(signal, "SIGKILL", getattr(signal, "SIGTERM", 15))  # Windows has no SIGKILL
+
+
+def _default_vm_name() -> str:
+    try:
+        return socket.gethostname() or "vm"
+    except Exception:
+        return "vm"
 
 
 def _iter_proc_pids():
@@ -79,7 +88,8 @@ class Supervisor:
                  free_vram_fn=None, calib=None, stats=None, poll=2.0,
                  ready_timeout=3600.0, reclaim_timeout=600.0, logout_address=None,
                  h5_override=None, retry_failed=False, gpu=0, qdir=None,
-                 no_calib=False, ram_divisor=1, shard=(0, 1), work_dir=None):
+                 no_calib=False, ram_divisor=1, shard=(0, 1), work_dir=None,
+                 vm_name=None, liveness=None):
         self.config = config
         self.config_path = config_path
         self.logout_address = logout_address
@@ -97,8 +107,11 @@ class Supervisor:
         # so single-machine behaviour is unchanged.
         self.work_dir = Path(work_dir) if work_dir else Path(self.out_dir)
         self.qdir = Path(qdir) if qdir is not None else protocol.default_qdir(self.work_dir)
-        self.ledger = Ledger(Path(config.out_dir) / "ledger.jsonl")
-        self.probe_queue = Path(config.out_dir) / "probe_queue"
+        # ledger = MACHINE-LOCAL forensics/attempts (the cross-VM done-truth is the
+        # coordinator's per-combo status/done markers). Keep it in work_dir so many
+        # VMs sharing one out_dir never append to one ledger on the network FS.
+        self.ledger = Ledger(Path(self.work_dir) / "ledger.jsonl")
+        self.probe_queue = Path(config.out_dir) / "probe_queue"   # dir of per-probe files -> shared-safe
         self._spawn_fn = spawn_worker or self._default_spawn
         self._free_vram_fn = free_vram_fn or _free_vram_bytes_smi
         self.poll = poll
@@ -116,10 +129,25 @@ class Supervisor:
         # Coordination state -- per-instance by default; run_sweep replaces these
         # refs on every lane so they share one grid/tally/ledger.
         self.total = 0
-        self._grid = None                      # shared iterator of (position, combo)
         self._grid_lock = threading.Lock()
         self._tally = {"done": 0, "failed": 0, "skipped": 0}
         self._tally_lock = threading.Lock()
+        # Cross-VM coordination (file-based, shared out_dir). One Coordinator per VM,
+        # shared by all lanes. Claims are atomic (O_EXCL status.json) so lanes AND VMs
+        # never train the same combo; done = checkpoint exists (migration) OR done.json.
+        self._vm_name_req = vm_name
+        self._liveness = liveness
+        self.coordinator = None
+        self.vm_name = None
+        self._ordered_ids = []
+        self._combo_by_id = {}
+        self._fits_fn = None
+        # Capability routing (heterogeneous VMs: L4 / A100 / B200): each combo's
+        # portable standard-mode peak vs this card's VRAM and everyone else's.
+        self._std_peak_gib = {}
+        self._my_vram_gib = None
+        self._vram_cache = None
+        self._vram_cache_ts = 0.0
 
     def _share_from(self, primary: "Supervisor") -> None:
         """Adopt the primary lane's shared coordination state (multi-GPU)."""
@@ -127,10 +155,13 @@ class Supervisor:
         self.stats = primary.stats
         self.calib = primary.calib
         self.total = primary.total
-        self._grid = primary._grid
-        self._grid_lock = primary._grid_lock
         self._tally = primary._tally
         self._tally_lock = primary._tally_lock
+        self.coordinator = primary.coordinator
+        self.vm_name = primary.vm_name
+        self._ordered_ids = primary._ordered_ids
+        self._combo_by_id = primary._combo_by_id
+        self._fits_fn = primary._fits_fn
 
     def _free_vram(self) -> float:
         return self._free_vram_fn(self.gpu)
@@ -374,7 +405,24 @@ class Supervisor:
         plan = oom_proxy.plan_combo_chunked(
             self.calib, worst, self._free_vram(), combo.num_latents, combo.view,
             self.config.train.batch_size, safety=self.config.memory.vram_safety, try_paired=False,
-            cache_bytes=cache_bytes, ram_budget=self._ram_budget())
+            total_sentences=total, cache_bytes=cache_bytes, ram_budget=self._ram_budget())
+        # Surface the memory model so it can be sanity-checked against real peaks.
+        # Two ORTHOGONAL axes:
+        #  * backward_mode (across games): standard = keep every game's graph for one
+        #    backward (peak ~ R + C*total); split_recompute = one game at a time (peak
+        #    ~ R + C*worst).
+        #  * stem chunk (within one game): the latent cross-attention is ALWAYS the
+        #    online-softmax + checkpoint path in training (chunk_size>0), so this is
+        #    just the CHUNK COUNT -- 1 chunk when it covers the biggest game, more when
+        #    it's split. (The fused nn.MultiheadAttention path is eval-only.)
+        n = int(plan["stem_chunk_size"])
+        fwd_worst = max(1, int(worst * combo.view))          # forwarded sentences, biggest game, one view
+        n_chunks = -(-fwd_worst // n)                          # ceil
+        stem = "full" if plan.get("chunk_full") else f"chunk={n} (~{n_chunks}/worst-game)"
+        print(f"supervisor: gpu{self.gpu} {combo.combo_id} plan: backward={plan['backward_mode']} "
+              f"stem={stem} view={combo.view:g} worst={worst} total={total} "
+              f"std_peak={plan.get('standard_peak_gib')}GiB budget={plan.get('budget_gib')}GiB "
+              f"cache={plan['cache_mode']}", flush=True)
         return {"backward_mode": plan["backward_mode"],
                 "stem_chunk_size": int(plan["stem_chunk_size"]),
                 "paired": False,
@@ -434,6 +482,36 @@ class Supervisor:
             combos = [c for idx, c in enumerate(combos) if idx % n == i]
         return combos
 
+    def _order_combos(self, combos: list) -> list:
+        """Schedule order: run the FAST tier first -- 'backward=standard, stem=full'
+        (fits in one pass) -- descending batch size so the biggest fast combos start
+        early; defer the SLOW tier (split_recompute / multi-chunk) to the end. Batch
+        size S = 2*view*total is a machine-independent proxy for peak, so the order
+        is stable across GPUs. One plan per combo (cheap; a single VRAM snapshot)."""
+        ds = self.config.data_seed
+        free = self._free_vram()          # snapshot once (avoid one nvidia-smi per combo)
+        ram = self._ram_budget()
+        self._std_peak_gib = {}
+
+        def scored(c):
+            total = self.stats.subset_total_sentences(c.train_games, ds.train_game_seed, ds.anchors)
+            worst = self.stats.subset_worst_sentences(c.train_games, ds.train_game_seed, ds.anchors)
+            cache_bytes = oom_proxy.estimate_full_cache_bytes(total, c.view, self.stats.input_dim)
+            plan = oom_proxy.plan_combo_chunked(
+                self.calib, worst, free, c.num_latents, c.view, self.config.train.batch_size,
+                safety=self.config.memory.vram_safety, try_paired=False,
+                total_sentences=total, cache_bytes=cache_bytes, ram_budget=ram)
+            self._std_peak_gib[c.combo_id] = plan.get("standard_peak_gib")   # portable across VMs
+            light = plan["backward_mode"] == "standard" and bool(plan.get("chunk_full"))
+            return (0 if light else 1, -(2.0 * float(c.view) * float(total)))
+
+        keyed = [(scored(c), c) for c in combos]
+        keyed.sort(key=lambda t: t[0])
+        n_light = sum(1 for (tier, _), _ in keyed if tier == 0)
+        print(f"supervisor: scheduling {n_light} fast (standard+full) then "
+              f"{len(keyed) - n_light} slow (split/chunked), each by descending size", flush=True)
+        return [c for _, c in keyed]
+
     def _prepare(self, gpus=None) -> None:
         """Shared, run once (by the primary lane): reconcile, calibrate, load
         stats, and build the shared grid iterator. Safe to call before spawning
@@ -443,44 +521,90 @@ class Supervisor:
         self.ledger.reconcile_running()
         if self.retry_failed:
             self._reset_failed()
-        combos = self._sharded_combos()
-        self.total = len(combos)
-        self._grid = enumerate(combos, 1)
         self._ensure_calib()
         self._ensure_inputs()
+        combos = self._order_combos(self._sharded_combos())   # fast tier first, slow tier last
+        self.total = len(combos)
+        self._ordered_ids = [c.combo_id for c in combos]
+        self._combo_by_id = {c.combo_id: c for c in combos}
+        self._start_coordinator(gpus or [self.gpu])
         i, n = self._shard
         shard_note = f" (shard {i}/{n} of {self.config.combo_count()})" if n > 1 else ""
-        print(f"supervisor: {self.total} combos to process{shard_note}", flush=True)
+        print(f"supervisor: {self.total} combos to process{shard_note} as vm={self.vm_name}", flush=True)
+
+    def _start_coordinator(self, gpus) -> None:
+        """One Coordinator per VM (shared by all lanes): file-based, cross-VM claims on
+        the shared out_dir. done = checkpoint exists (recognises the CURRENT run's
+        finished combos -> seamless migration) OR done.json. Atomic O_EXCL claim means
+        no two lanes -- or VMs -- ever train the same combo."""
+        def _done_fn(cid):
+            c = self._combo_by_id.get(cid)
+            return bool(c) and jobspec.combo_paths(self.config, c)["checkpoint"].exists()
+        liveness = self._liveness or LeaseLiveness(lease=600.0, refresh=120.0)
+        base = self._vm_name_req or _default_vm_name()
+        total_vram = 0.0
+        try:
+            total_vram = self._total_vram()
+        except Exception:
+            pass
+        info = {"gpus": list(gpus), "cores": jobspec.effective_cpu_count(),
+                "vram_gib": round(total_vram / oom_proxy.GIB, 1) if total_vram else None}
+        self.coordinator = Coordinator(self.out_dir, base, done_fn=_done_fn, liveness=liveness, info=info)
+        self.vm_name = self.coordinator.vm_name
+        self._my_vram_gib = info["vram_gib"]
+        self._fits_fn = self._capability_fits   # skip combos better run on a bigger VM
+
+    def _max_alive_vram(self) -> float | None:
+        """Biggest single-card VRAM among ALIVE VMs (registry). Cached ~3s so
+        next_claim's per-combo fits check doesn't re-glob the registry each time."""
+        now = time.time()
+        if now - self._vram_cache_ts > 3.0:
+            vrams = [i.get("vram_gib") for _, i in self.coordinator.alive_vms() if i.get("vram_gib")]
+            self._vram_cache = max(vrams) if vrams else None
+            self._vram_cache_ts = now
+        return self._vram_cache
+
+    def _capability_fits(self, cid) -> bool:
+        """Heterogeneous routing: claim a combo iff it fits MY card in fast standard,
+        OR I'm the biggest alive VM (so a combo too big for EVERY card still gets done
+        -- on the biggest card, in split -- never starved). Unknown peak/VRAM -> claim
+        (safe default; degrades to no routing, e.g. homogeneous or single VM)."""
+        peak = self._std_peak_gib.get(cid)
+        my = self._my_vram_gib
+        if peak is None or not my:
+            return True
+        safety = float(getattr(self.config.memory, "vram_safety", 0.85))
+        if float(peak) <= my * safety:
+            return True                              # fits me -> fast standard here
+        biggest = self._max_alive_vram()
+        return biggest is None or my >= biggest      # else only the biggest takes it
+
+    def close(self) -> None:
+        if self.coordinator is not None:
+            self.coordinator.close()
 
     def _claim(self):
-        """Thread-safe: pull the next combo still needing work. Returns
-        (position, combo) or None when the grid is drained. Verified-done combos
-        are skipped here so no lane wastes a worker cycle on them."""
-        while True:
-            with self._grid_lock:
-                item = next(self._grid, None)
-            if item is None:
-                return None
-            position, combo = item
-            config_hash = self.config.config_hash(combo)
-            paths = jobspec.combo_paths(self.config, combo)
-            if self.ledger.is_done(combo.combo_id, config_hash) and paths["checkpoint"].exists():
-                self._bump("skipped")
-                print(f"supervisor: {combo.combo_id} skip (already done) | {self._progress()}", flush=True)
-                continue
-            return position, combo
+        """Claim the next combo THIS vm should run -- atomic across lanes AND VMs.
+        None means nothing is claimable-by-us right now (all done, or in flight on a
+        live peer we could later reclaim)."""
+        cid = self.coordinator.next_claim(self._ordered_ids, self._fits_fn, lane=self.gpu)
+        return self._combo_by_id.get(cid) if cid else None
+
+    def _all_done(self) -> bool:
+        return all(self.coordinator.is_terminal(cid) for cid in self._ordered_ids)
 
     def _lane_loop(self) -> None:
-        """Bring this lane's worker up, then drain the shared grid until empty."""
+        """Bring this lane's worker up, then drain the shared queue until every combo
+        is done (a None claim just means 'nothing for me now' -> wait for peers)."""
         protocol.clear_queue(self.qdir)   # drop stale jobs from a previous crashed run
         self._wait_ready()
         try:
-            while True:
-                claimed = self._claim()
-                if claimed is None:
-                    break
-                position, combo = claimed
-                self._run_combo(combo, position, self.total)
+            while not self._all_done():
+                combo = self._claim()
+                if combo is None:
+                    time.sleep(self.poll)      # nothing for us now; wait for peers/reclaim
+                    continue
+                self._run_combo(combo)
         finally:
             protocol.write_stop(self.qdir)
             self._kill_worker()
@@ -489,7 +613,10 @@ class Supervisor:
         """Single-lane sweep (single GPU / tests): prepare + drain."""
         self._prepare()
         self.no_calib = True       # calib already produced by _prepare; worker skips it
-        self._lane_loop()
+        try:
+            self._lane_loop()
+        finally:
+            self.close()
         summary = self.ledger.summary()
         print(f"supervisor: sweep complete [{self.total}/{self.total}] -> {summary}", flush=True)
         return summary
@@ -505,6 +632,7 @@ class Supervisor:
             attempts = int((self.ledger.get(combo_id) or {}).get("attempts", 0))
             if attempts >= MAX_ATTEMPTS:
                 self.ledger.mark_failed(combo_id, f"exhausted {attempts} attempts")
+                self.coordinator.mark_failed(combo_id, f"exhausted {attempts} attempts")  # terminal marker
                 self._bump("failed")
                 print(f"supervisor: {tag} {combo_id} FAILED after {attempts} attempts | {self._progress()}", flush=True)
                 return
@@ -519,7 +647,8 @@ class Supervisor:
             protocol.clear_combo(self.qdir, combo_id)
             argv = jobspec.build_trainer_argv(self.config, combo, settings,
                                               probe_queue_dir=self.probe_queue,
-                                              data_workers=self._data_workers)
+                                              data_workers=self._data_workers,
+                                              vm_name=self.vm_name)
             protocol.write_job(self.qdir, {
                 "combo_id": combo_id, "config_hash": config_hash,
                 "argv": argv, "settings": settings, "ckpt": str(paths["checkpoint"]),
@@ -543,8 +672,14 @@ class Supervisor:
             if result.get("status") == "done":
                 self.ledger.mark_done(combo_id, result.get("peak_mem_gib"), result.get("ckpt"))
                 protocol.clear_combo(self.qdir, combo_id)
-                self._bump("done")
-                print(f"supervisor: {tag} {combo_id} done (peak={result.get('peak_mem_gib')}GiB) | {self._progress()}", flush=True)
+                # Fence at commit: only publish done if we STILL own the claim. If a
+                # peer reclaimed it (our lease lapsed), the checkpoint is idempotent and
+                # theirs is authoritative -- don't double-count.
+                if self.coordinator.fenced_done(combo_id, lane=self.gpu):
+                    self._bump("done")
+                    print(f"supervisor: {tag} {combo_id} done (peak={result.get('peak_mem_gib')}GiB) | {self._progress()}", flush=True)
+                else:
+                    print(f"supervisor: {tag} {combo_id} done but claim was reclaimed by a peer; not double-counting", flush=True)
                 return
             # oom / error -> downgrade and retry.
             status = result.get("status")
@@ -573,7 +708,8 @@ class Supervisor:
 def run_sweep(config: SweepConfig, config_path, gpus, *, logout_address=None,
               h5_override=None, retry_failed=False, poll=2.0, ready_timeout=3600.0,
               reclaim_timeout=600.0, spawn_worker=None, free_vram_fn=None,
-              calib=None, stats=None, shard=(0, 1), work_dir=None) -> dict:
+              calib=None, stats=None, shard=(0, 1), work_dir=None,
+              vm_name=None, liveness=None) -> dict:
     """Drive the sweep across ``gpus``. One lane per GPU, each with its own worker
     (pinned via CUDA_VISIBLE_DEVICES) and its own job queue subdir; all lanes share
     one ledger + grid + tally so every combo is trained exactly once. A single GPU
@@ -591,33 +727,37 @@ def run_sweep(config: SweepConfig, config_path, gpus, *, logout_address=None,
     common = dict(config_path=config_path, logout_address=logout_address,
                   h5_override=h5_override, poll=poll, ready_timeout=ready_timeout,
                   reclaim_timeout=reclaim_timeout, no_calib=True, ram_divisor=len(gpus),
-                  spawn_worker=spawn_worker, free_vram_fn=free_vram_fn, work_dir=work_dir)
+                  spawn_worker=spawn_worker, free_vram_fn=free_vram_fn, work_dir=work_dir,
+                  vm_name=vm_name, liveness=liveness)
 
     primary = Supervisor(config, gpu=gpus[0], qdir=qdir_for(gpus[0]),
                          retry_failed=retry_failed, calib=calib, stats=stats,
                          shard=shard, **common)
-    primary._prepare(gpus)                    # auto-clear GPUs + reconcile + calib + stats + grid
+    primary._prepare(gpus)                    # auto-clear GPUs + calib + stats + coordinator
     lanes = [primary]
     for g in gpus[1:]:
         lane = Supervisor(config, gpu=g, qdir=qdir_for(g), retry_failed=False, **common)
         lane._share_from(primary)
         lanes.append(lane)
 
-    print(f"supervisor: driving {primary.total} combos across gpus={gpus} "
+    print(f"supervisor: driving {primary.total} combos as vm={primary.vm_name} across gpus={gpus} "
           f"| {jobspec.effective_cpu_count()} cores -> {primary._data_workers} data-workers/lane", flush=True)
-    if len(lanes) == 1:
-        lanes[0]._lane_loop()
-    else:
-        threads = [threading.Thread(target=ln._lane_loop, name=f"lane-gpu{ln.gpu}", daemon=True)
-                   for ln in lanes]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+    try:
+        if len(lanes) == 1:
+            lanes[0]._lane_loop()
+        else:
+            threads = [threading.Thread(target=ln._lane_loop, name=f"lane-gpu{ln.gpu}", daemon=True)
+                       for ln in lanes]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+    finally:
+        primary.close()                        # stop the lease refresher
 
     summary = primary.ledger.summary()
     print(f"supervisor: sweep complete [{primary.total}/{primary.total}] "
-          f"gpus={gpus} -> {summary}", flush=True)
+          f"gpus={gpus} vm={primary.vm_name} -> {summary}", flush=True)
     return summary
 
 
@@ -658,10 +798,14 @@ def parse_args(argv=None):
                         "one worker per GPU (e.g. '0,1,2,3'). Combos are split across GPUs via a "
                         "shared in-process grid; each GPU trains a different combo at the same time.")
     p.add_argument("--shard", default=None,
-                   help="Run only a DISJOINT slice of the sweep: 'i/N' means keep combos whose "
-                        "index %% N == i. Use to split ONE sweep across independent machines, each "
-                        "with its own --out-dir: VM A '--shard 0/2', VM B '--shard 1/2'. Within a "
-                        "machine, --gpus still parallelises that machine's slice across its GPUs.")
+                   help="(Legacy static split) run only combos whose index %% N == i ('i/N'). "
+                        "With the default cross-VM coordinator you usually DON'T need this -- all "
+                        "VMs share one out_dir and claim combos dynamically. Use only to hard-carve "
+                        "the grid across machines that must not share an out_dir.")
+    p.add_argument("--vm-name", default=None,
+                   help="This machine's name in the shared VM_parallel/ registry (default: "
+                        "hostname). Duplicates get a _N suffix. VMs coordinate through the shared "
+                        "out_dir, claiming combos atomically so none is trained twice.")
     return p.parse_args(argv)
 
 
@@ -675,7 +819,7 @@ def run_main(args) -> None:
     shard = _parse_shard(args.shard) if args.shard else (0, 1)
     summary = run_sweep(config, args.config, gpus, logout_address=args.logout_address,
                         h5_override=args.h5, retry_failed=args.retry_failed, shard=shard,
-                        work_dir=args.work_dir)
+                        work_dir=args.work_dir, vm_name=args.vm_name)
     print(f"sweep done: {summary}", flush=True)
 
 

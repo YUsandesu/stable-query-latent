@@ -404,15 +404,25 @@ def plan_combo(calib: dict, worst_game_sentences: int, free_vram_bytes: float,
 def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: float,
                        num_latents: int, view: float, batch_size: int, *,
                        safety: float = 0.85, try_paired: bool = True,
-                       mode: str = "standard",
+                       mode: str = "standard", total_sentences: int = 0,
                        cache_bytes: float = 0.0, ram_budget: float = 0.0) -> dict:
-    """Chunked-stem plan: never drop sentences, pick a stem chunk size instead.
+    """Chunked-stem plan: never drop sentences, pick the backward mode + stem chunk.
 
-    The chunked stem (model.HierarchicalLatentArrayMLP, chunk_size) bounds the
-    per-game stem peak to ~R + C*chunk, so ANY game trains in full -- the only
-    levers are the chunk size and whether two arms (paired) fit. Chunk size is
-    derived from the same calibrated (C, R) as the cap planner; factors are
-    conservative (err small = safe) pending a chunked-stem recalibration on GPU.
+    Memory model (both from the same calibrated ``peak = R + C*S``, S = both-view
+    forwarded sentences):
+
+    * ``standard`` holds EVERY game's graph until one backward, so its peak scales
+      with the WHOLE batch: ``R + C_std * (2*view*total_sentences)``. It grows with
+      the game count -- chunking the stem does not help (the retained per-game
+      latents still stack).
+    * ``split_recompute`` processes one game at a time (stems parked on CPU, backward
+      replayed per game), so its peak is set by the WORST single game, independent of
+      the game count. The chunked stem bounds that game further to ``~R + C*chunk``.
+
+    So we pick ``standard`` only when the whole batch's forward actually fits, else
+    start in ``split_recompute`` (the worst-game-bounded mode) directly -- instead of
+    OOMing in standard and reactively downgrading. ``total_sentences<=0`` (unknown)
+    keeps the caller's ``mode``.
     """
     budget = float(free_vram_bytes) * float(safety)
     # Host-RAM decision (independent of VRAM): if the full pinned cache would not
@@ -422,23 +432,38 @@ def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: 
     if ram_budget and ram_budget > 0 and cache_bytes and cache_bytes > ram_budget:
         cache_mode, pin_cache = "queue", False
 
-    entry = calib.get(_calib_key(num_latents, mode)) or calib.get(_calib_key(num_latents, "split_recompute"))
+    # --- backward-mode selection from the memory model ---
+    std = calib.get(_calib_key(num_latents, "standard"))
+    chosen_mode = mode
+    standard_peak = None
+    if total_sentences and total_sentences > 0 and std:
+        s_total = 2.0 * float(view) * float(total_sentences)     # both views, whole batch
+        standard_peak = float(std["R"]) + float(std["C"]) * s_total
+        chosen_mode = "standard" if standard_peak <= budget else "split_recompute"
+
+    entry = calib.get(_calib_key(num_latents, chosen_mode)) or calib.get(_calib_key(num_latents, "split_recompute"))
     if not entry:
         # No calibration for this num_latents: fall back to a small conservative
         # chunk (never 0 -- 0 means "don't chunk" and would risk OOM).
         return {"num_latents": int(num_latents), "view": float(view),
                 "worst_game_sentences": int(worst_game_sentences),
-                "backward_mode": mode, "paired": False,
+                "backward_mode": chosen_mode, "paired": False,
                 "stem_chunk_size": NO_CALIB_CHUNK,
+                "chunk_full": NO_CALIB_CHUNK >= float(worst_game_sentences) * float(view),
                 "cache_mode": cache_mode, "pin_cache": pin_cache,
                 "budget_gib": round(budget / GIB, 2),
                 "note": "no calibration; conservative chunk"}
     C, R = float(entry["C"]), float(entry["R"])
+    # split's slope was fit against the whole CALIB_N_GAMES-game pseudo-batch total,
+    # but a split STEP's peak is one game (~1/N of that S), so the true cost per
+    # forwarded sentence is ~N x the fitted slope. Correct it so the chunk is sized
+    # for a single game, not the whole calib batch.
+    c_sent = C * float(CALIB_N_GAMES) if chosen_mode == "split_recompute" else C
 
     def chunk_for(resident_R: float) -> int:
-        # Per-chunk peak ~ resident_R + C * chunk_sentences; /2 keeps a margin
-        # for both views held in standard mode. Floor at 1 so it always fits.
-        return max(1, int((budget - resident_R) / (2.0 * C)))
+        # Per-chunk peak ~ resident_R + c_sent * chunk_sentences; /2 keeps a margin
+        # for both views held. Floor at 1 so it always fits.
+        return max(1, int((budget - resident_R) / (2.0 * c_sent)))
 
     paired = bool(try_paired) and (budget - 2.0 * R) > 0
     resident_R = 2.0 * R if paired else R
@@ -446,17 +471,24 @@ def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: 
     if budget - resident_R <= 0:           # model itself doesn't fit: can't pair
         paired = False
         chunk = chunk_for(R)
+    # "full" = one chunk covers the biggest game's forwarded sentences (view*worst,
+    # one view) -> the stem runs in a single online-softmax pass. This is the fast,
+    # small-VRAM-friendly class the scheduler prioritises.
+    fwd_worst = float(worst_game_sentences) * float(view)
+    chunk_full = int(chunk) >= fwd_worst
     return {
         "num_latents": int(num_latents),
         "view": float(view),
         "worst_game_sentences": int(worst_game_sentences),
-        "backward_mode": mode,
+        "backward_mode": chosen_mode,
         "paired": bool(paired),
         "stem_chunk_size": int(chunk),
+        "chunk_full": bool(chunk_full),
         "cache_mode": cache_mode,
         "pin_cache": pin_cache,
         "budget_gib": round(budget / GIB, 2),
-        "note": "ok" if chunk < worst_game_sentences else "chunk >= biggest game (single pass)",
+        "standard_peak_gib": None if standard_peak is None else round(standard_peak / GIB, 2),
+        "note": (f"{chosen_mode}: " + ("full (1 pass)" if chunk_full else "chunked")),
     }
 
 

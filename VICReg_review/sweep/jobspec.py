@@ -56,7 +56,7 @@ def combo_paths(config, combo) -> dict:
 
 def build_trainer_argv(config, combo, settings: dict, *, device: str = "cuda",
                        probe_queue_dir=None, resume: bool = True,
-                       data_workers: int | None = None) -> list[str]:
+                       data_workers: int | None = None, vm_name: str | None = None) -> list[str]:
     paths = combo_paths(config, combo)
     grl = combo.arm == "grl"
     cache_mode = settings.get("cache_mode", "full")
@@ -109,4 +109,9 @@ def build_trainer_argv(config, combo, settings: dict, *, device: str = "cuda",
         argv += ["--probe-queue-dir", str(probe_queue_dir)]
     if resume and paths["checkpoint"].exists():
         argv += ["--resume-checkpoint", str(paths["checkpoint"])]
+    if vm_name:
+        # Per-epoch fence: the trainer aborts if this combo's status.json stops
+        # naming us (a peer reclaimed it after our lease lapsed). Status lives next
+        # to the checkpoint, written by the coordinator.
+        argv += ["--fence-status", str(paths["dir"] / "status.json"), "--fence-vm", str(vm_name)]
     return argv

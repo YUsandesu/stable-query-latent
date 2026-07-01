@@ -1591,6 +1591,24 @@ def maybe_run_probe(model, args, device, epoch, global_step, probe_rows):
         run_dual_probe(model, args, device, epoch, global_step, probe_rows)
 
 
+def _fence_check(args):
+    """Multi-VM coordination fence: if another VM reclaimed this combo (our lease
+    lapsed while we stalled), stop wasting GPU on it instead of finishing a result
+    that will be discarded anyway. Cost is one small status.json read per epoch.
+    Conservative: a transient read failure does NOT abort -- only a status that
+    clearly names a different owner does. No-op unless --fence-status/--fence-vm set."""
+    path = getattr(args, "fence_status", None)
+    vm = getattr(args, "fence_vm", None)
+    if not path or not vm:
+        return
+    try:
+        owner = json.loads(Path(path).read_text(encoding="utf-8")).get("vm")
+    except (OSError, json.JSONDecodeError):
+        return
+    if owner is not None and owner != vm:
+        raise RuntimeError(f"fence: combo reclaimed by {owner!r} (we are {vm!r}); aborting")
+
+
 def train(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -1752,6 +1770,7 @@ def train(args):
     last_metrics = None
     try:
         for epoch in range(start_epoch, args.epochs + 1):
+            _fence_check(args)   # multi-VM: abort early if this combo was reclaimed from us
             model.train()
             if expander is not None:
                 expander.train()
@@ -1869,6 +1888,11 @@ def parse_args(argv=None):
     parser.add_argument("--best-checkpoint-out", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_best.pt"))
     parser.add_argument("--history-tsv", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_history.tsv"))
     parser.add_argument("--manifest-json", default=str(DEFAULT_HEADS_DIR / "vicreg_review_h5_manifest.json"))
+    parser.add_argument("--fence-status", default=None,
+                        help="Multi-VM coordination: path to this combo's status.json. Checked "
+                             "each epoch; if it no longer names --fence-vm, abort (another VM "
+                             "reclaimed the combo after our lease lapsed). Off unless both are set.")
+    parser.add_argument("--fence-vm", default=None, help="Our VM name for the fence check.")
     parser.add_argument("--probe-every", type=int, default=1,
                         help="Run the aligned full probe every N epochs after --probe-start-epoch. "
                              "0 = off (e.g. for smoke tests).")

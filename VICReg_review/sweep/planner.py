@@ -42,7 +42,7 @@ def plan_for_combo(config: SweepConfig, calib: dict, stats: "oom_proxy.GameStats
     plan = oom_proxy.plan_combo_chunked(
         calib, worst, free_vram_bytes, combo.num_latents, combo.view,
         config.train.batch_size, safety=config.memory.vram_safety, try_paired=try_paired,
-        cache_bytes=cache_bytes, ram_budget=ram_budget,
+        total_sentences=total, cache_bytes=cache_bytes, ram_budget=ram_budget,
     )
     plan["combo_id"] = combo.combo_id
     plan["train_games"] = combo.train_games

@@ -1,53 +1,61 @@
-# Pod Deployment Notes
+# Pod Deployment — multi-VM coordinated sweep
 
-This folder is a VM deployment bundle. Copy the files in this directory directly to
-the root directory of the cloud virtual machine / pod before running the workflow.
+`Pod/` is the **single template**. Run **`prepare_pods.ipynb` once, on the first VM** — it
+installs git, pulls the repo, and generates the per-VM bundles `Pod_1 … Pod_5` at the
+`/workspace` root (each with its `VM_NAME` = `VM1`…`VM5`). Because `/workspace` is shared,
+one run makes **every VM's folder appear**; VM _N_ just opens `/workspace/Pod_N`. You only
+maintain this one template — re-run the generator to push template changes to all bundles.
 
-## Files
+All VMs **share one `out_dir` on `/workspace`** and claim combos atomically, so no combo
+is trained twice, the run is resumable, and an in-progress single-VM run **migrates
+automatically** (a combo whose checkpoint already exists is recognised as done).
 
-- `setup.ipynb`: one-time or rerunnable environment setup.
-- `run.ipynb`: main pipeline runner. Run this after `setup.ipynb`.
-- `realtime_reader.ipynb`: log reader for checking progress while `run.ipynb` is
-  running.
-- `start_old.ipynb`: older startup notebook kept for reference.
-- `../tools/sync_runpod_artifacts.ps1`: Windows helper that downloads only the
-  expensive RunPod artifacts from the RunPod S3 bucket.
+## Notebooks (run in this order)
 
-## Workflow
+- **`prepare_pods.ipynb`** (repo root, NOT in a bundle) — run once on the first VM to
+  generate `/workspace/Pod_1..5` from this template. See the deploy sequence below.
+- **`setup.ipynb`** — environment: gh CLI, clone/pull, `pip install`, flash-attn. Once per pod.
+- **`prepare_training.ipynb`** — build/embed the H5 (**one VM only** — it writes the shared
+  `embedding_h5.h5`; if it already exists, build/embed just skip) → stage the H5 to local
+  NVMe → smoke-validate the pipeline (per-VM `cloud_smoke_<VM>`).
+- **`training.ipynb`** — the coordinated sweep. Registers this VM, claims combos, trains.
+- **`check_paralle.ipynb`** — verify the *live* coordination (O_EXCL atomic on this mount,
+  VM registry, migration OK). Run it **after** training has started.
+- **`realtime_reader.ipynb`** — follow this VM's log + global coordinated progress.
+- **`eval.ipynb`** — post-training: drain probes + final eval + archive (run on one VM).
 
-1. Copy the contents of this `Pod/` directory to the VM root directory.
-2. Open and run `setup.ipynb`.
-3. Open and run `run.ipynb`.
-4. When progress needs to be checked, open `realtime_reader.ipynb`.
+## Deploy sequence
 
-`realtime_reader.ipynb` has two important cells:
+0. **First VM:** drag in + run **`prepare_pods.ipynb`** → generates `/workspace/Pod_1..5`
+   (shared, so all VMs now have their folder).
+1. **Every VM:** open its `/workspace/Pod_N` → `setup` → `prepare_training`.
+2. **VM1 only:** start `training`.
+3. **Run `check_paralle`** (on VM1, or any VM — it reads the shared dir): confirm
+   **O_EXCL is atomic on MooseFS ✓**, **VM1 registered ✓**, **migration OK** (existing
+   checkpoints recognized, none re-claimed) **✓**.
+4. **If green → VM2…VM5:** start `training`.
+5. **Re-run `check_paralle`** → see all 5 claiming, **no combo twice**.
 
-- Cell 1 loads historical log output and manifest summaries.
-- Cell 2 follows new log output in realtime. It starts after Cell 1's log offset,
-  so it does not repeat the historical output already shown by Cell 1.
+## Multi-VM setup notes
 
-Interrupting Cell 2 only stops the log viewer. It does not stop the running
-pipeline.
+- **`VM_NAME`** is set by `prepare_pods.ipynb` per bundle (`Pod_N` → `VM_N`) in
+  `training.ipynb` / `prepare_training.ipynb` / `realtime_reader.ipynb` — don't hand-edit
+  each folder; edit the `Pod/` template and re-run the generator. Duplicates auto-get a `_2`.
+- **Shared `OUT_DIR`**: `VICReg_review/heads/cloud_full_sweep_a100` (all VMs). Each combo's
+  files are written by exactly one VM → **outputs never overwrite each other**.
+- **Per-VM log**: `/workspace/stable_query_latent_logs/pipeline_<VM>.log` — centrally
+  readable, one file per VM, so logs never mix.
+- **Machine-local scratch** (`calib.json`, job queue, ledger) lives under the system temp
+  dir keyed by `VM_NAME` — never on the shared FS.
 
-## Download RunPod Artifacts
+## Download RunPod artifacts
 
-Use the selective sync helper instead of syncing the whole bucket:
+Use the selective sync helper (`../tools/sync_runpod_artifacts.ps1`) instead of syncing the
+whole bucket — it grabs only the expensive outputs (`text_h5.h5`, `embedding_h5.h5`, their
+manifests, `VICReg_review/heads`, `stable_query_latent_artifacts`, logs):
 
 ```powershell
-.\tools\sync_runpod_artifacts.ps1
-```
-
-The helper downloads only the high-cost corpus and experiment outputs generated
-by `run.ipynb`: `text_h5.h5`, `embedding_h5.h5`, their manifests,
-`VICReg_review/heads`, `stable_query_latent_artifacts`, and RunPod logs. Preview
-first with:
-
-```powershell
-.\tools\sync_runpod_artifacts.ps1 -DryRun
-```
-
-To print the generated `aws s3 sync` command without contacting S3:
-
-```powershell
-.\tools\sync_runpod_artifacts.ps1 -PrintOnly
+.\tools\sync_runpod_artifacts.ps1            # sync
+.\tools\sync_runpod_artifacts.ps1 -DryRun    # preview
+.\tools\sync_runpod_artifacts.ps1 -PrintOnly # print the aws s3 sync command only
 ```
