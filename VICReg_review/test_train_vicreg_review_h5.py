@@ -32,6 +32,7 @@ def test_full_cache_prefetch_keeps_view_cap_and_train_indices_separate():
         sample_fraction=0.8,
         seed=42,
         pin_cache=True,
+        prefetch_batches=2,
         game_order="random",
         max_batch_sentences=0,
         max_view_sentences=4096,

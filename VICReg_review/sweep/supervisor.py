@@ -155,7 +155,7 @@ class Supervisor:
         self._fits_fn = None
         # Capability routing (heterogeneous VMs: L4 / A100 / B200): each combo's
         # portable standard-mode peak vs this card's VRAM and everyone else's.
-        self._std_peak_gib = {}
+        self._std_required_gib = {}
         self._my_vram_gib = None
         self._vram_cache = None
         self._vram_cache_ts = 0.0
@@ -432,7 +432,9 @@ class Supervisor:
         stem = "full" if plan.get("chunk_full") else f"chunk={n} (~{n_chunks}/worst-game)"
         print(f"supervisor: gpu{self.gpu} {combo.combo_id} plan: backward={plan['backward_mode']} "
               f"stem={stem} view={combo.view:g} worst={worst} total={total} "
-              f"std_peak={plan.get('standard_peak_gib')}GiB budget={plan.get('budget_gib')}GiB "
+              f"std_peak={plan.get('standard_peak_gib')}GiB "
+              f"std_required={plan.get('standard_required_gib')}GiB "
+              f"budget={plan.get('budget_gib')}GiB "
               f"cache={plan['cache_mode']}", flush=True)
         return {"backward_mode": plan["backward_mode"],
                 "stem_chunk_size": int(plan["stem_chunk_size"]),
@@ -446,10 +448,10 @@ class Supervisor:
         fall back to split_recompute, then shrink further."""
         chunk = int(settings.get("stem_chunk_size", 0) or 0)
         mode = settings.get("backward_mode", "standard")
-        if chunk > MIN_CHUNK * 4:
-            return {**settings, "stem_chunk_size": max(MIN_CHUNK, chunk // 2)}
         if mode != "split_recompute":
             return {**settings, "backward_mode": "split_recompute"}
+        if chunk > MIN_CHUNK * 4:
+            return {**settings, "stem_chunk_size": max(MIN_CHUNK, chunk // 2)}
         return {**settings, "stem_chunk_size": max(MIN_CHUNK // 2, chunk // 2)}
 
     @staticmethod
@@ -502,7 +504,7 @@ class Supervisor:
         ds = self.config.data_seed
         free = self._free_vram()          # snapshot once (avoid one nvidia-smi per combo)
         ram = self._ram_budget()
-        self._std_peak_gib = {}
+        self._std_required_gib = {}
 
         def scored(c):
             total = self.stats.subset_total_sentences(c.train_games, ds.train_game_seed, ds.anchors)
@@ -512,7 +514,9 @@ class Supervisor:
                 self.calib, worst, free, c.num_latents, c.view, self.config.train.batch_size,
                 safety=self.config.memory.vram_safety, try_paired=False,
                 total_sentences=total, cache_bytes=cache_bytes, ram_budget=ram)
-            self._std_peak_gib[c.combo_id] = plan.get("standard_peak_gib")   # portable across VMs
+            self._std_required_gib[c.combo_id] = (
+                plan.get("standard_required_gib") or plan.get("standard_peak_gib")
+            )   # portable across VMs
             light = plan["backward_mode"] == "standard" and bool(plan.get("chunk_full"))
             return (0 if light else 1, -(2.0 * float(c.view) * float(total)))
 
@@ -583,7 +587,7 @@ class Supervisor:
         OR I'm the biggest alive VM (so a combo too big for EVERY card still gets done
         -- on the biggest card, in split -- never starved). Unknown peak/VRAM -> claim
         (safe default; degrades to no routing, e.g. homogeneous or single VM)."""
-        peak = self._std_peak_gib.get(cid)
+        peak = self._std_required_gib.get(cid)
         my = self._my_vram_gib
         if peak is None or not my:
             return True

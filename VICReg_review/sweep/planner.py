@@ -74,13 +74,14 @@ def format_table(rows: list[dict], free_vram_bytes: float, safety: float, pool: 
                  ram_budget_gib: float = 0.0) -> str:
     out = [f"memory plan | free_vram={free_vram_bytes / GIB:.1f}GiB safety={safety} "
            f"ram_budget={ram_budget_gib:.0f}GiB pool={pool} games", ""]
-    header = ("num_lat", "view", "games", "worst_g", "mode", "paired", "chunk", "cache_gib", "cache", "note")
+    header = ("num_lat", "view", "games", "worst_g", "mode", "paired", "chunk", "std_req", "cache_gib", "cache", "note")
     out.append("  ".join(f"{h:>9}" for h in header))
     for r in rows:
         row = (r["num_latents"], f"{r['view']:g}", r["train_games"] or "all",
                r["worst_game_sentences"], r["backward_mode"],
                "Y" if r["paired"] else "n", r["stem_chunk_size"],
-               r.get("cache_gib", "?"), r.get("cache_mode", "full"), r["note"])
+               r.get("standard_required_gib", "?"), r.get("cache_gib", "?"),
+               r.get("cache_mode", "full"), r["note"])
         out.append("  ".join(f"{str(c):>9}" for c in row))
     return "\n".join(out)
 

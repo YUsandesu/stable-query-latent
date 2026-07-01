@@ -96,6 +96,15 @@ DEFAULT_MODES = ("standard", "split_recompute")
 # chunked stem bounded rather than running an unchunked, possibly-OOM forward).
 NO_CALIB_CHUNK = 2048
 
+# The standard-backward calibration is intentionally cheap: it measures a few
+# small pseudo batches, then extrapolates the activation slope. Production plans
+# also set a stem_chunk_size. When that chunk covers the largest game, the
+# chunked stem allocates an fp32 attention score tensor of shape
+# [batch=1, heads, num_latents, chunk_sentences]. The small calibration points do
+# not see the 10+ GiB late allocation from view80/1024-latent full chunks, so the
+# planner must reserve it explicitly before choosing standard mode.
+DEFAULT_NUM_HEADS = 8
+
 
 # Host-RAM accounting lives in the torch-free mem_budget module so the notebook
 # monitor can share the exact same definition without importing torch/the trainer.
@@ -111,6 +120,22 @@ def estimate_full_cache_bytes(total_sentences: int, view: float, input_dim: int,
     """Approx host RAM for --cache-mode full: ~one epoch of sampled views (both
     a/b) materialised, plus the prefetched next epoch. dtype float16 = 2 bytes."""
     return float(total_sentences) * float(view) * 2.0 * int(input_dim) * dtype_bytes * float(prefetch_factor)
+
+
+def estimate_standard_transient_bytes(worst_game_sentences: int, view: float, num_latents: int,
+                                      *, num_heads: int = DEFAULT_NUM_HEADS,
+                                      score_dtype_bytes: int = 4) -> float:
+    """Largest chunked-stem score tensor not captured by small-S calibration."""
+    chunk_sentences = max(1.0, float(worst_game_sentences) * float(view))
+    return (float(num_heads) * float(num_latents) *
+            chunk_sentences * float(score_dtype_bytes))
+
+
+def estimate_stem_score_bytes_per_sentence(num_latents: int, *,
+                                           num_heads: int = DEFAULT_NUM_HEADS,
+                                           score_dtype_bytes: int = 4) -> float:
+    """Per-view-sentence fp32 score cost for the chunked stem."""
+    return float(num_heads) * float(num_latents) * float(score_dtype_bytes)
 # Total forwarded sentences (both views) probed per calibration point. Kept
 # small so calibration never OOMs even at num_latents=1024; >=2 successes are
 # enough to fit the line.
@@ -436,10 +461,14 @@ def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: 
     std = calib.get(_calib_key(num_latents, "standard"))
     chosen_mode = mode
     standard_peak = None
+    standard_transient = 0.0
+    standard_required = None
     if total_sentences and total_sentences > 0 and std:
         s_total = 2.0 * float(view) * float(total_sentences)     # both views, whole batch
         standard_peak = float(std["R"]) + float(std["C"]) * s_total
-        chosen_mode = "standard" if standard_peak <= budget else "split_recompute"
+        standard_transient = estimate_standard_transient_bytes(worst_game_sentences, view, num_latents)
+        standard_required = standard_peak + standard_transient
+        chosen_mode = "standard" if standard_required <= budget else "split_recompute"
 
     entry = calib.get(_calib_key(num_latents, chosen_mode)) or calib.get(_calib_key(num_latents, "split_recompute"))
     if not entry:
@@ -459,6 +488,7 @@ def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: 
     # forwarded sentence is ~N x the fitted slope. Correct it so the chunk is sized
     # for a single game, not the whole calib batch.
     c_sent = C * float(CALIB_N_GAMES) if chosen_mode == "split_recompute" else C
+    c_sent = max(c_sent, estimate_stem_score_bytes_per_sentence(num_latents))
 
     def chunk_for(resident_R: float) -> int:
         # Per-chunk peak ~ resident_R + c_sent * chunk_sentences; /2 keeps a margin
@@ -488,6 +518,8 @@ def plan_combo_chunked(calib: dict, worst_game_sentences: int, free_vram_bytes: 
         "pin_cache": pin_cache,
         "budget_gib": round(budget / GIB, 2),
         "standard_peak_gib": None if standard_peak is None else round(standard_peak / GIB, 2),
+        "standard_transient_gib": None if standard_peak is None else round(standard_transient / GIB, 2),
+        "standard_required_gib": None if standard_required is None else round(standard_required / GIB, 2),
         "note": (f"{chosen_mode}: " + ("full (1 pass)" if chunk_full else "chunked")),
     }
 
