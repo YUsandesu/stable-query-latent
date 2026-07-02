@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
         metavar="LATENTS:VIEW",
         help="Prune combos with this num_latents and sample_fraction/view. Example: 1024:0.8",
     )
+    p.add_argument("--drop-all", action="store_true", help="Prune train_game_count=all combos.")
     p.add_argument("--apply", action="store_true", help="Actually write failed.json markers.")
     p.add_argument(
         "--include-live",
@@ -81,9 +82,11 @@ def parse_latent_view_rules(values: list[str]) -> list[tuple[int, float]]:
     return rules
 
 
-def prune_reasons(combo, threshold: int, latent_view_rules: list[tuple[int, float]]) -> list[str]:
+def prune_reasons(combo, threshold: int, latent_view_rules: list[tuple[int, float]], drop_all: bool) -> list[str]:
     reasons = []
     train_games = int(combo.train_games)
+    if drop_all and train_games <= 0:
+        reasons.append("train_games=all")
     if threshold > 0 and 0 < train_games < threshold:
         reasons.append(f"train_games={train_games} < threshold={threshold}")
     for latents, view in latent_view_rules:
@@ -100,7 +103,7 @@ def main() -> None:
     out_dir = Path(cfg.out_dir)
     threshold = int(args.threshold)
     latent_view_rules = parse_latent_view_rules(args.drop_latent_view)
-    if threshold <= 0 and not latent_view_rules:
+    if threshold <= 0 and not latent_view_rules and not args.drop_all:
         raise SystemExit("No prune rules active. Pass --threshold N and/or --drop-latent-view LATENTS:VIEW.")
 
     counts = {
@@ -119,7 +122,7 @@ def main() -> None:
 
     now = time.time()
     for combo in cfg.iter_combos():
-        reasons = prune_reasons(combo, threshold, latent_view_rules)
+        reasons = prune_reasons(combo, threshold, latent_view_rules, args.drop_all)
         if not reasons:
             continue
         counts["eligible"] += 1
@@ -152,6 +155,7 @@ def main() -> None:
                 "num_latents": int(combo.num_latents),
                 "view": float(combo.view),
                 "threshold": threshold,
+                "drop_all": bool(args.drop_all),
                 "drop_latent_view": [{"num_latents": int(n), "view": float(v)} for n, v in latent_view_rules],
             }
             if atomic_create_json(combo_dir / coord.FAILED, payload):
@@ -165,6 +169,7 @@ def main() -> None:
     print(f"{mode}: prune selected combos")
     print(f"out_dir: {out_dir}")
     print(f"threshold: {threshold} ({'enabled' if threshold > 0 else 'disabled'})")
+    print(f"drop_all: {bool(args.drop_all)}")
     print(f"drop_latent_view: {latent_view_rules or '[]'}")
     for key, value in counts.items():
         print(f"{key:14}: {value}")
